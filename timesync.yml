@@ -6,12 +6,6 @@
     - name: Set timezone to Africa/Lagos
       command: timedatectl set-timezone Africa/Lagos
  
-    - name: Install chrony on RHEL-based systems
-      yum:
-        name: chrony
-        state: present
-      when: ansible_os_family == "RedHat"
- 
     - name: Ensure chrony service is running
       service:
         name: chronyd
