@@ -2,18 +2,18 @@
 - name: Configure timezone and time sync
   hosts: all
   become: yes
-  vars:
-    my_timezone: "Africa/Lagos"
- 
   tasks:
-    - name: Set timezone
-      community.general.timezone:
-        name: "{{ my_timezone }}"
-   
+    - name: Set timezone to Africa/Lagos
+      command: timedatectl set-timezone Africa/Lagos
+ 
+    - name: Install chrony on RHEL-based systems
+      yum:
+        name: chrony
+        state: present
+      when: ansible_os_family == "RedHat"
+ 
     - name: Ensure chrony service is running
-      ansible.builtin.service:
+      service:
         name: chronyd
         state: started
         enabled: yes
-
- 
