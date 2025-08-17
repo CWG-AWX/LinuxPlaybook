@@ -1,0 +1,28 @@
+---
+- name: Configure timezone and time sync
+  hosts: all
+  become: yes
+  vars:
+    timezone: "Africa/Lagos"
+  tasks:
+    - name: Set timezone
+      timezone:
+        name: "{{ timezone }}"
+ 
+    - name: Install chrony on Debian/Ubuntu
+      apt:
+        name: chrony
+        state: present
+      when: ansible_os_family == "Debian"
+ 
+    - name: Install chrony on RHEL-based systems
+      yum:
+        name: chrony
+        state: present
+      when: ansible_os_family == "RedHat"
+ 
+    - name: Ensure chrony service is running
+      service:
+        name: chronyd
+        state: started
+        enabled: yes
