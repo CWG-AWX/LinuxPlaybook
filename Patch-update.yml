@@ -10,7 +10,7 @@
       when: ansible_os_family == "Debian"
  
     - name: Update all packages on RHEL-based systems
-      yum:
+      dnf:
         name: "*"
         state: latest
       when: ansible_os_family == "RedHat"
