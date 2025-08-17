@@ -3,11 +3,11 @@
   hosts: all
   become: yes
   vars:
-    timezone: "Africa/Lagos"
+    timezone_var: "Africa/Lagos"
   tasks:
     - name: Set timezone
       timezone:
-        name: "{{ timezone }}"
+        name: "{{ timezone_var }}"
  
     - name: Install chrony on Debian/Ubuntu
       apt:
