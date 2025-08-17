@@ -4,18 +4,12 @@
   become: yes
   vars:
     my_timezone: "Africa/Lagos"
-
+ 
   tasks:
     - name: Set timezone
-      ansible.builtin.timezone:
+      community.general.timezone:
         name: "{{ my_timezone }}"
-
-    - name: Install chrony on RHEL-based systems
-      ansible.builtin.yum:
-        name: chrony
-        state: present
-      when: ansible_os_family == "RedHat"
- 
+   
     - name: Ensure chrony service is running
       ansible.builtin.service:
         name: chronyd
