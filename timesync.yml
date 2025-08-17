@@ -3,23 +3,16 @@
   hosts: all
   become: yes
   vars:
-    timezone_var: "Africa/Lagos"
+    my_time: "Africa/Lagos"
   tasks:
     - name: Set timezone
       timezone:
-        name: "{{ timezone_var }}"
- 
-    - name: Install chrony on Debian/Ubuntu
-      apt:
-        name: chrony
-        state: present
-      when: ansible_os_family == "Debian"
+        name: "{{ my_time }}"
  
     - name: Install chrony on RHEL-based systems
       yum:
         name: chrony
         state: present
-      when: ansible_os_family == "RedHat"
  
     - name: Ensure chrony service is running
       service:
