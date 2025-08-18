@@ -1,15 +1,18 @@
 ---
-- name: Patch Linux servers
-  hosts: localhost
+- name: Patch and update Ubuntu servers
+  hosts: all
+  gather_facts: yes
+ 
   tasks:
-    - name: Update and upgrade packages on Debian/Ubuntu
+    - name: Update apt package cache
       apt:
         update_cache: yes
-        upgrade: dist
-      when: ansible_os_family == "Ubuntu"
+        cache_valid_time: 3600
+      tags: update_cache
  
-    - name: Update all packages on RHEL-based systems
-      dnf:
-        name: "*"
-        state: latest
-      when: ansible_os_family == "RedHat"
+    - name: Upgrade all packages to latest version
+      apt:
+        upgrade: dist
+        autoremove: yes
+        autoclean: yes
+      tags: upgrade
