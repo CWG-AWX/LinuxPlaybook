@@ -1,6 +1,6 @@
 ---
 - name: Ping all servers
-  hosts: all
+  hosts: Exsi
   gather_facts: no
 
   tasks:
