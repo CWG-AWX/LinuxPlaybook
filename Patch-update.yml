@@ -1,7 +1,6 @@
 ---
 - name: Patch Linux servers
   hosts: localhost
-  become: yes
   tasks:
     - name: Update and upgrade packages on Debian/Ubuntu
       apt:
