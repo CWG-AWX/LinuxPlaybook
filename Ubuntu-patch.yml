@@ -1,6 +1,6 @@
 ---
 - name: Patch and update Ubuntu servers
-  hosts: ubuntu_servers
+  hosts: all
   become: yes
   gather_facts: yes
  
