@@ -1,6 +1,6 @@
 ---
 - name: Ping all servers
-  hosts: localhost
+  hosts: all
   gather_facts: no
 
   tasks:
