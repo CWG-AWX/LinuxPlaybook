@@ -7,7 +7,7 @@
       apt:
         update_cache: yes
         upgrade: dist
-      when: ansible_os_family == "Debian"
+      when: ansible_os_family == "Ubuntu"
  
     - name: Update all packages on RHEL-based systems
       dnf:
