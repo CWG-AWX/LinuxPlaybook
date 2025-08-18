@@ -2,6 +2,7 @@
 - name: Patch and update Ubuntu servers
   hosts: all
   become: yes
+  become_method: su
   gather_facts: yes
  
   tasks:
