@@ -1,6 +1,7 @@
 ---
 - name: Test connectivity to 8.8.8.8
   hosts: all
+  become_user: root
   gather_facts: no
 
   tasks:
