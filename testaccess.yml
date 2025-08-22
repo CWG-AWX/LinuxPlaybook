@@ -1,8 +1,8 @@
 ---
 - name: Test connectivity to 8.8.8.8
   hosts: all
-  become_user: root
-  gather_facts: no
+  become: true
+  gather_facts: yes
 
   tasks:
     - name: Run ICMP ping to 8.8.8.8
