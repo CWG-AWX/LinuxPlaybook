@@ -1,7 +1,7 @@
 ---
 - name: Ping all servers to 8.8.8.8
   hosts: all
-  become: true
+  remote_user: root      # <--- tells Ansible to use root
   gather_facts: no
 
   tasks:
