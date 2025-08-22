@@ -1,0 +1,20 @@
+---
+- name: Test network connectivity to 8.8.8.8
+  hosts: all
+  gather_facts: no
+  become: false
+
+  tasks:
+    - name: Ping 8.8.8.8 to test external network connectivity
+      command: ping -c 4 8.8.8.8
+      register: ping_result
+      ignore_errors: yes
+
+    - name: Show ping output
+      debug:
+        var: ping_result.stdout
+
+    - name: Fail if ping failed
+      fail:
+        msg: "Host {{ inventory_hostname }} cannot reach 8.8.8.8"
+      when: ping_result.rc != 0
