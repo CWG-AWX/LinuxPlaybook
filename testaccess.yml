@@ -1,15 +1,14 @@
 ---
 - name: Test connectivity to 8.8.8.8
   hosts: all
-  become: true
-  gather_facts: yes
+  gather_facts: no
 
   tasks:
-    - name: Ping 8.8.8.8 using command
-      ansible.builtin.command: ping -c 2 8.8.8.8
+    - name: Run ICMP ping to 8.8.8.8
+      ansible.builtin.shell: ping -c 2 8.8.8.8
       register: ping_result
       ignore_errors: no
 
-    - name: Show ping result
+    - name: Show ping output
       ansible.builtin.debug:
         msg: "{{ inventory_hostname }} -> {{ ping_result.stdout | default('Ping failed') }}"
