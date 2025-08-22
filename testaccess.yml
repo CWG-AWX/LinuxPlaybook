@@ -8,7 +8,7 @@
     - name: Ping 8.8.8.8 to test external network connectivity
       command: ping -c 4 8.8.8.8
       register: ping_result
-      ignore_errors: yes
+      ignore_errors: no
 
     - name: Show ping output
       debug:
