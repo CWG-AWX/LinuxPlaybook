@@ -8,7 +8,7 @@
     - name: Ping 8.8.8.8 using command
       ansible.builtin.command: ping -c 2 8.8.8.8
       register: ping_result
-      ignore_errors: yes
+      ignore_errors: no
 
     - name: Show ping result
       ansible.builtin.debug:
