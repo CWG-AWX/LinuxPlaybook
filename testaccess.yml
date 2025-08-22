@@ -2,7 +2,7 @@
 - name: Test network connectivity to 8.8.8.8
   hosts: all
   gather_facts: no
-  become: false
+  become: True
 
   tasks:
     - name: Ping 8.8.8.8 to test external network connectivity
