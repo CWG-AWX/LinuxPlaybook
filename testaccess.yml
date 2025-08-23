@@ -1,20 +1,13 @@
 ---
-- name: Check connectivity to Google DNS
+- name: Test connectivity to Google DNS
   hosts: all
-  gather_facts: no
+  gather_facts: yes
 
   tasks:
-    - name: Try HTTPS request to Google DNS (8.8.8.8)
-      ansible.builtin.uri:
-        url: https://8.8.8.8
-        method: GET
-        return_content: no
-        validate_certs: no
-      register: result
-      ignore_errors: no
+    - name: Ping Google DNS (8.8.8.8)
+      ansible.builtin.command: ping -c 4 8.8.8.8
+      register: ping_result
 
-    - name: Show result
+    - name: Show ping output
       ansible.builtin.debug:
-        var: result
-      when: result is defined
- 
+        var: ping_result.stdout
