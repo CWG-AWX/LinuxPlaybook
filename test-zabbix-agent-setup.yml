@@ -1,37 +1,35 @@
 ---
-- name: Test Zabbix Agent Onboarding Logic (No Installation)
+- name: Onboard Zabbix Agent from Local AWX Repo
   hosts: all
+  become: yes
   vars:
-    zabbix_server_ip: "192.168.184.84"
-    zabbix_version: "7.0"
+    zabbix_repo_url: "http://192.168.122.140:8080"
+    zabbix_version: "7.2.7"
 
   tasks:
-
-    - name: Gather basic facts
-      setup:
-        filter: ansible_os_family
-
-    - name: Display detected OS family
-      debug:
-        msg: "Detected OS family: {{ ansible_os_family }}"
-
-    - name: Test connectivity to Zabbix Server
-      ansible.builtin.shell: ping -c 2 {{ zabbix_server_ip }}
-      register: ping_result
-      ignore_errors: yes
-
-    - name: Show ping result
-      debug:
-        msg: "{{ ping_result.stdout_lines | default(['Ping failed or unreachable']) }}"
-
-    - name: Test conditional blocks (without running installation)
-      block:
-        - name: Simulate RHEL logic
-          debug:
-            msg: "✅ This host would run the RHEL/CentOS installation tasks."
+    - name: Install Zabbix Agent on RHEL/CentOS
       when: ansible_os_family == "RedHat"
+      shell: |
+        dnf install -y {{ zabbix_repo_url }}/rhel/zabbix-agent*.rpm
 
-    - name: Simulate Debian/Ubuntu logic
-      debug:
-        msg: "✅ This host would run the Ubuntu/Debian installation tasks."
+    - name: Install Zabbix Agent on Ubuntu/Debian
       when: ansible_os_family == "Debian"
+      shell: |
+        wget -q {{ zabbix_repo_url }}/ubuntu/zabbix-agent*.deb -P /tmp/
+        dpkg -i /tmp/zabbix-agent*.deb || apt-get install -f -y
+
+    - name: Configure Zabbix Agent
+      lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^Server=', line: "Server=192.168.184.84" }
+        - { regexp: '^ServerActive=', line: "ServerActive=192.168.184.84" }
+        - { regexp: '^Hostname=', line: "Hostname={{ inventory_hostname }}" }
+
+    - name: Enable and start Zabbix Agent service
+      service:
+        name: zabbix-agent
+        state: started
+        enabled: yes
