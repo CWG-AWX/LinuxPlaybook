@@ -1,0 +1,37 @@
+---
+- name: Test Zabbix Agent Onboarding Logic (No Installation)
+  hosts: all
+  vars:
+    zabbix_server_ip: "192.168.184.84"
+    zabbix_version: "7.0"
+
+  tasks:
+
+    - name: Gather basic facts
+      setup:
+        filter: ansible_os_family
+
+    - name: Display detected OS family
+      debug:
+        msg: "Detected OS family: {{ ansible_os_family }}"
+
+    - name: Test connectivity to Zabbix Server
+      ansible.builtin.shell: ping -c 2 {{ zabbix_server_ip }}
+      register: ping_result
+      ignore_errors: yes
+
+    - name: Show ping result
+      debug:
+        msg: "{{ ping_result.stdout_lines | default(['Ping failed or unreachable']) }}"
+
+    - name: Test conditional blocks (without running installation)
+      block:
+        - name: Simulate RHEL logic
+          debug:
+            msg: "✅ This host would run the RHEL/CentOS installation tasks."
+      when: ansible_os_family == "RedHat"
+
+    - name: Simulate Debian/Ubuntu logic
+      debug:
+        msg: "✅ This host would run the Ubuntu/Debian installation tasks."
+      when: ansible_os_family == "Debian"
