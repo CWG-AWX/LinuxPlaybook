@@ -5,7 +5,7 @@
   tasks:
     - name: Copy script from AWX host to remote VM
       copy:
-        src: /root/fs-manager3.sh
+        src: /var/lib/awx/projects/scripts/fs-manager3.sh
         dest: /tmp/fs-manager3.sh
         mode: '0755'
 
