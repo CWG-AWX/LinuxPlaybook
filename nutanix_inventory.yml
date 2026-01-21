@@ -1,0 +1,16 @@
+plugin: community.nutanix.nutanix
+prism_host: 10.20.24.60
+prism_port: 9440
+validate_certs: false
+
+username: awx_inventory
+password: "Cwg@2026"
+
+filters:
+  power_state: ON
+
+group_by:
+  - categories
+
+cache: true
+cache_timeout: 300
