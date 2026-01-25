@@ -4,95 +4,78 @@
   become: yes
   vars:
     report_file: "/tmp/patch_audit_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
-    
-    # Gmail SMTP Configuration
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
     smtp_pass: "{{ vault_smtp_password }}" 
-    email_recipient: "michael.obateru@cwg-plc.com"
+    email_recipient: "auditor@yourcompany.com"
 
   tasks:
-    - name: 1. Initialize variables for report
+    - name: 1. Initialize variables
       set_fact:
         patch_status: "No updates needed"
-        update_count: 0
         reboot_required: "No"
 
-    # --- RHEL / CENTOS / ROCKY SECTION ---
-    - name: 2. Patch RedHat-based systems
+    # --- RHEL SECTION ---
+    - name: 2. Patch RedHat
       block:
-        - name: RHEL | Apply updates (Skip broken repos)
-          dnf:
-            name: "*"
-            state: latest
-            skip_if_unavailable: yes
+        - name: RHEL | Upgrade
+          dnf: { name: "*", state: latest, skip_if_unavailable: yes }
           register: rhel_out
-          when: ansible_os_family == "RedHat"
-
-        - name: RHEL | Record status
+        - name: RHEL | Check Reboot
+          command: needs-restarting -r
+          register: rhel_reboot_check
+          ignore_errors: yes
+          changed_when: false
+        - name: RHEL | Record
           set_fact:
             patch_status: "{{ 'Success' if rhel_out.changed else 'No updates needed' }}"
-            update_count: "{{ rhel_out.results | length if rhel_out.changed else 0 }}"
-      rescue:
-        - set_fact:
-            patch_status: "Failed - Repo/Network Issue"
+            reboot_required: "{{ 'Yes' if rhel_reboot_check.rc | default(0) != 0 else 'No' }}"
       when: ansible_os_family == "RedHat"
+      rescue:
+        - set_fact: { patch_status: "Failed" }
 
-    # --- DEBIAN / UBUNTU SECTION ---
-    - name: 3. Patch Debian-based systems
+    # --- DEBIAN SECTION ---
+    - name: 3. Patch Debian
       block:
-        - name: Debian | Update cache (Ignore broken 3rd party)
-          apt:
-            update_cache: yes
-          ignore_errors: yes
-          when: ansible_os_family == "Debian"
-
-        - name: Debian | Upgrade all packages
-          apt:
-            upgrade: dist
+        - name: Debian | Upgrade
+          apt: { upgrade: dist, update_cache: yes }
           register: deb_out
-          when: ansible_os_family == "Debian"
-
-        - name: Debian | Check if reboot required
-          stat:
-            path: /var/run/reboot-required
+        - name: Debian | Check Reboot
+          stat: { path: /var/run/reboot-required }
           register: reboot_file
-
-        - name: Debian | Record status
+        - name: Debian | Record
           set_fact:
             patch_status: "{{ 'Success' if deb_out.changed else 'No updates needed' }}"
             reboot_required: "{{ 'Yes' if reboot_file.stat.exists else 'No' }}"
-      rescue:
-        - set_fact:
-            patch_status: "Failed - Dependency Issue"
       when: ansible_os_family == "Debian"
+      rescue:
+        - set_fact: { patch_status: "Failed" }
 
-    # --- AUDIT REPORT GENERATION ---
-    - name: 4. Create CSV Header on AWX Controller
+    # --- REPORT & EMAIL ---
+    - name: 4. Build Report
       run_once: true
       delegate_to: localhost
       copy:
         dest: "{{ report_file }}"
-        content: "Hostname,IP_Address,OS_Family,Status,Reboot_Required,Timestamp\n"
+        content: "Hostname,IP,OS,Status,Reboot_Required,Timestamp\n"
 
-    - name: 5. Append host data to CSV
+    - name: 5. Append data
       delegate_to: localhost
       lineinfile:
         path: "{{ report_file }}"
         line: "{{ inventory_hostname }},{{ ansible_default_ipv4.address }},{{ ansible_os_family }},{{ patch_status }},{{ reboot_required }},{{ ansible_date_time.iso8601 }}"
 
-    - name: 6. Send Audit Report via Gmail
+    - name: 6. Send Email
       run_once: true
       delegate_to: localhost
-      mail:
+      community.general.mail: # Use FQCN here
         host: "{{ smtp_server }}"
         port: "{{ smtp_port }}"
         username: "{{ smtp_user }}"
         password: "{{ smtp_pass }}"
         secure: starttls
         to: "{{ email_recipient }}"
-        subject: "PROD AUDIT: OS Patching Report - {{ ansible_date_time.date }}"
-        body: "Automated patch run complete for {{ ansible_play_hosts_all | length }} servers. See attached CSV."
+        subject: "PROD AUDIT: OS Patching Report"
+        body: "Patching complete. CSV attached."
         attach: "{{ report_file }}"
-      ignore_errors: yes
