@@ -63,6 +63,7 @@
 
     - name: 5. Append data
       delegate_to: localhost
+      become: no
       lineinfile:
         path: "{{ report_file }}"
         line: "{{ inventory_hostname }},{{ ansible_default_ipv4.address }},{{ ansible_os_family }},{{ patch_status }},{{ reboot_required }},{{ ansible_date_time.iso8601 }}"
@@ -70,6 +71,7 @@
     - name: 6. Send Email
       run_once: true
       delegate_to: localhost
+      become: no
       community.general.mail: # Use FQCN here
         host: "{{ smtp_server }}"
         port: "{{ smtp_port }}"
