@@ -56,6 +56,7 @@
     - name: 4. Build Report
       run_once: true
       delegate_to: localhost
+      become: no
       copy:
         dest: "{{ report_file }}"
         content: "Hostname,IP,OS,Status,Reboot_Required,Timestamp\n"
