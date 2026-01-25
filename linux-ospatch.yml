@@ -1,0 +1,145 @@
+---
+- name: Linux OS patching
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    patch_report_file: "/tmp/patch_report_{{ inventory_hostname }}.txt"
+
+  pre_tasks:
+    - name: Detect OS family
+      debug:
+        msg: "Detected OS family: {{ ansible_os_family }}"
+
+    ############################
+    # Debian / Ubuntu handling #
+    ############################
+
+    - name: Find third-party apt repo files
+      find:
+        paths: /etc/apt/sources.list.d
+        patterns: "*.list"
+      register: apt_third_party_repos
+      when: ansible_os_family == "Debian"
+
+    - name: Disable third-party apt repos
+      command: mv {{ item.path }} {{ item.path }}.disabled
+      loop: "{{ apt_third_party_repos.files }}"
+      when:
+        - ansible_os_family == "Debian"
+        - apt_third_party_repos.matched > 0
+      changed_when: true
+
+    ###########################
+    # RHEL / CentOS handling #
+    ###########################
+
+    - name: Find third-party yum repo files
+      find:
+        paths: /etc/yum.repos.d
+        patterns: "*.repo"
+      register: yum_repo_files
+      when: ansible_os_family == "RedHat"
+
+    - name: Disable non-base yum repos
+      replace:
+        path: "{{ item.path }}"
+        regexp: '^enabled=1'
+        replace: 'enabled=0'
+      loop: "{{ yum_repo_files.files }}"
+      when: ansible_os_family == "RedHat"
+      changed_when: true
+
+  tasks:
+    - block:
+
+        ############################
+        # Debian / Ubuntu patching #
+        ############################
+
+        - name: Update apt cache (OS repos only)
+          apt:
+            update_cache: yes
+            cache_valid_time: 3600
+          when: ansible_os_family == "Debian"
+          register: apt_update_result
+
+        - name: Upgrade Debian-based OS packages
+          apt:
+            upgrade: dist
+            autoremove: yes
+            autoclean: yes
+          when: ansible_os_family == "Debian"
+          register: apt_upgrade_result
+
+        ###########################
+        # RHEL / CentOS patching #
+        ###########################
+
+        - name: Patch RedHat-based OS packages
+          yum:
+            name: "*"
+            state: latest
+            update_cache: yes
+            disable_gpg_check: yes
+          when: ansible_os_family == "RedHat"
+          register: yum_upgrade_result
+
+        #################
+        # Patch report #
+        #################
+
+        - name: Write patch report
+          copy:
+            dest: "{{ patch_report_file }}"
+            content: |
+              Patch Report for {{ inventory_hostname }}
+              =======================================
+              OS Family: {{ ansible_os_family }}
+
+              {% if ansible_os_family == "Debian" %}
+              Apt Update Result:
+              {{ apt_update_result | to_nice_json }}
+
+              Apt Upgrade Result:
+              {{ apt_upgrade_result | to_nice_json }}
+              {% endif %}
+
+              {% if ansible_os_family == "RedHat" %}
+              Yum Upgrade Result:
+              {{ yum_upgrade_result | to_nice_json }}
+              {% endif %}
+          delegate_to: localhost
+
+      always:
+
+        ############################
+        # Restore apt repos #
+        ############################
+
+        - name: Restore third-party apt repos
+          command: mv {{ item.path }}.disabled {{ item.path }}
+          loop: "{{ apt_third_party_repos.files | default([]) }}"
+          when:
+            - ansible_os_family == "Debian"
+            - apt_third_party_repos.matched > 0
+          changed_when: true
+
+        ############################
+        # Restore yum repos #
+        ############################
+
+        - name: Re-enable yum repos
+          replace:
+            path: "{{ item.path }}"
+            regexp: '^enabled=0'
+            replace: 'enabled=1'
+          loop: "{{ yum_repo_files.files | default([]) }}"
+          when: ansible_os_family == "RedHat"
+          changed_when: true
+
+  post_tasks:
+    - name: Patch completion notice
+      debug:
+        msg: "Linux OS patching completed for {{ inventory_hostname }}. Report saved at {{ patch_report_file }}"
