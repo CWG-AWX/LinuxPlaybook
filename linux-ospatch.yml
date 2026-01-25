@@ -1,146 +1,98 @@
 ---
-- name: Linux OS patching
+- name: Multi-OS Security Patching & Audit Reporting
   hosts: all
   become: yes
-  gather_facts: yes
-
   vars:
-    patch_report_file: "/tmp/patch_report_{{ inventory_hostname }}.txt"
-
-  pre_tasks:
-    - name: Detect OS family
-      debug:
-        msg: "Detected OS family: {{ ansible_os_family }}"
-
-    ############################
-    # Debian / Ubuntu handling #
-    ############################
-
-    - name: Find third-party apt repo files
-      find:
-        paths: /etc/apt/sources.list.d
-        patterns: "*.list"
-      register: apt_third_party_repos
-      when: ansible_os_family == "Debian"
-
-    - name: Disable third-party apt repos
-      command: mv {{ item.path }} {{ item.path }}.disabled
-      loop: "{{ apt_third_party_repos.files }}"
-      when:
-        - ansible_os_family == "Debian"
-        - apt_third_party_repos.matched > 0
-      changed_when: true
-
-    ###########################
-    # RHEL / CentOS handling #
-    ###########################
-
-    - name: Find third-party yum repo files
-      find:
-        paths: /etc/yum.repos.d
-        patterns: "*.repo"
-      register: yum_repo_files
-      when: ansible_os_family == "RedHat"
-
-    - name: Disable non-base yum repos
-      replace:
-        path: "{{ item.path }}"
-        regexp: '^enabled=1'
-        replace: 'enabled=0'
-      loop: "{{ yum_repo_files.files }}"
-      when: ansible_os_family == "RedHat"
-      changed_when: true
+    report_file: "/tmp/patch_audit_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
+    
+    # Gmail SMTP Configuration
+    smtp_server: "smtp.gmail.com"
+    smtp_port: 587
+    smtp_user: "ignioservices@gmail.com"
+    smtp_pass: "{{ vault_smtp_password }}" 
+    email_recipient: "michael.obateru@cwg-plc.com"
 
   tasks:
-    - block:
+    - name: 1. Initialize variables for report
+      set_fact:
+        patch_status: "No updates needed"
+        update_count: 0
+        reboot_required: "No"
 
-        ############################
-        # Debian / Ubuntu patching #
-        ############################
-
-        - name: Update apt cache (OS repos only)
-          apt:
-            update_cache: yes
-            cache_valid_time: 3600
-          when: ansible_os_family == "Debian"
-          register: apt_update_result
-
-        - name: Upgrade Debian-based OS packages
-          apt:
-            upgrade: dist
-            autoremove: yes
-            autoclean: yes
-          when: ansible_os_family == "Debian"
-          register: apt_upgrade_result
-
-        ###########################
-        # RHEL / CentOS patching #
-        ###########################
-
-        - name: Patch RedHat-based OS packages
-          yum:
+    # --- RHEL / CENTOS / ROCKY SECTION ---
+    - name: 2. Patch RedHat-based systems
+      block:
+        - name: RHEL | Apply updates (Skip broken repos)
+          dnf:
             name: "*"
             state: latest
+            skip_if_unavailable: yes
+          register: rhel_out
+          when: ansible_os_family == "RedHat"
+
+        - name: RHEL | Record status
+          set_fact:
+            patch_status: "{{ 'Success' if rhel_out.changed else 'No updates needed' }}"
+            update_count: "{{ rhel_out.results | length if rhel_out.changed else 0 }}"
+      rescue:
+        - set_fact:
+            patch_status: "Failed - Repo/Network Issue"
+      when: ansible_os_family == "RedHat"
+
+    # --- DEBIAN / UBUNTU SECTION ---
+    - name: 3. Patch Debian-based systems
+      block:
+        - name: Debian | Update cache (Ignore broken 3rd party)
+          apt:
             update_cache: yes
-            disable_gpg_check: yes
-          when: ansible_os_family == "RedHat"
-          register: yum_upgrade_result
+          ignore_errors: yes
+          when: ansible_os_family == "Debian"
 
-        #################
-        # Patch report #
-        #################
+        - name: Debian | Upgrade all packages
+          apt:
+            upgrade: dist
+          register: deb_out
+          when: ansible_os_family == "Debian"
 
-        - name: Write patch report
-          copy:
-            dest: "{{ patch_report_file }}"
-            content: |
-              Patch Report for {{ inventory_hostname }}
-              =======================================
-              OS Family: {{ ansible_os_family }}
+        - name: Debian | Check if reboot required
+          stat:
+            path: /var/run/reboot-required
+          register: reboot_file
 
-              {% if ansible_os_family == "Debian" %}
-              Apt Update Result:
-              {{ apt_update_result | to_nice_json }}
+        - name: Debian | Record status
+          set_fact:
+            patch_status: "{{ 'Success' if deb_out.changed else 'No updates needed' }}"
+            reboot_required: "{{ 'Yes' if reboot_file.stat.exists else 'No' }}"
+      rescue:
+        - set_fact:
+            patch_status: "Failed - Dependency Issue"
+      when: ansible_os_family == "Debian"
 
-              Apt Upgrade Result:
-              {{ apt_upgrade_result | to_nice_json }}
-              {% endif %}
+    # --- AUDIT REPORT GENERATION ---
+    - name: 4. Create CSV Header on AWX Controller
+      run_once: true
+      delegate_to: localhost
+      copy:
+        dest: "{{ report_file }}"
+        content: "Hostname,IP_Address,OS_Family,Status,Reboot_Required,Timestamp\n"
 
-              {% if ansible_os_family == "RedHat" %}
-              Yum Upgrade Result:
-              {{ yum_upgrade_result | to_nice_json }}
-              {% endif %}
-          delegate_to: localhost
-          become: no
+    - name: 5. Append host data to CSV
+      delegate_to: localhost
+      lineinfile:
+        path: "{{ report_file }}"
+        line: "{{ inventory_hostname }},{{ ansible_default_ipv4.address }},{{ ansible_os_family }},{{ patch_status }},{{ reboot_required }},{{ ansible_date_time.iso8601 }}"
 
-      always:
-
-        ############################
-        # Restore apt repos #
-        ############################
-
-        - name: Restore third-party apt repos
-          command: mv {{ item.path }}.disabled {{ item.path }}
-          loop: "{{ apt_third_party_repos.files | default([]) }}"
-          when:
-            - ansible_os_family == "Debian"
-            - apt_third_party_repos.matched > 0
-          changed_when: true
-
-        ############################
-        # Restore yum repos #
-        ############################
-
-        - name: Re-enable yum repos
-          replace:
-            path: "{{ item.path }}"
-            regexp: '^enabled=0'
-            replace: 'enabled=1'
-          loop: "{{ yum_repo_files.files | default([]) }}"
-          when: ansible_os_family == "RedHat"
-          changed_when: true
-
-  post_tasks:
-    - name: Patch completion notice
-      debug:
-        msg: "Linux OS patching completed for {{ inventory_hostname }}. Report saved at {{ patch_report_file }}"
+    - name: 6. Send Audit Report via Gmail
+      run_once: true
+      delegate_to: localhost
+      mail:
+        host: "{{ smtp_server }}"
+        port: "{{ smtp_port }}"
+        username: "{{ smtp_user }}"
+        password: "{{ smtp_pass }}"
+        secure: starttls
+        to: "{{ email_recipient }}"
+        subject: "PROD AUDIT: OS Patching Report - {{ ansible_date_time.date }}"
+        body: "Automated patch run complete for {{ ansible_play_hosts_all | length }} servers. See attached CSV."
+        attach: "{{ report_file }}"
+      ignore_errors: yes
