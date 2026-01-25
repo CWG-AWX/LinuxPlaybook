@@ -8,7 +8,7 @@
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
     smtp_pass: "{{ vault_smtp_password }}" 
-    email_recipient: "auditor@yourcompany.com"
+    email_recipient: "blaizymike@gmail.com"
 
   tasks:
     - name: 1. Initialize variables
