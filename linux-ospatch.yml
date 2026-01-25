@@ -111,6 +111,7 @@
               {{ yum_upgrade_result | to_nice_json }}
               {% endif %}
           delegate_to: localhost
+          become: no
 
       always:
 
