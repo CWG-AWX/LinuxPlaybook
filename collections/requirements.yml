@@ -1,0 +1,6 @@
+---
+collections:
+  - name: nutanix.ncp
+    version: 2.3.0
+  - name: community.general
+    version: 8.2.0
