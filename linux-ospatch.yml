@@ -18,12 +18,12 @@
         full_os_name: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
         actual_hostname: "{{ ansible_hostname | default(inventory_hostname) }}"
 
-    # --- RHEL / CENTOS SECTION (7, 8, 9, 10) ---
+    # --- RHEL / CENTOS SECTION ---
     - name: 2. Patch RedHat Family
       block:
         - name: RHEL | Install reboot check tools
           package:
-            name: "{{ (ansible_distribution_major_version | int >= 8) | ternary('dnf-utils', 'yum-utils') }}"
+            name: yum-utils
             state: present
 
         - name: RHEL | Upgrade Packages
@@ -40,14 +40,14 @@
               echo "not-applicable"
             fi
           register: rhel_reboot_check
-          ignore_errors: yes
+          # rc 1 means reboot needed, rc 0 means no reboot. Both are valid.
+          failed_when: rhel_reboot_check.rc not in [0, 1]
           changed_when: false
 
         - name: RHEL | Record Status
           set_fact:
             patch_status: "{{ 'Success' if rhel_out.changed else 'No updates needed' }}"
-            reboot_required: >-
-              {{ 'Yes' if rhel_reboot_check.rc is defined and rhel_reboot_check.rc != 0 and rhel_reboot_check.stdout != 'not-applicable' else 'No' }}
+            reboot_required: "{{ 'Yes' if rhel_reboot_check.rc == 1 else 'No' }}"
       when: ansible_os_family == "RedHat"
       rescue:
         - set_fact:
@@ -106,5 +106,5 @@
         secure: starttls
         to: "{{ email_recipient }}"
         subject: "PROD AUDIT: OS Patching Report"
-        body: "Patching cycle complete. Please find the attached audit report for RHEL and Debian/Ubuntu systems."
+        body: "Patching cycle complete. Attached is the audit report for RHEL and Debian/Ubuntu systems."
         attach: "{{ report_file }}"
