@@ -15,64 +15,83 @@
       set_fact:
         patch_status: "No updates needed"
         reboot_required: "No"
+        full_os_name: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+        actual_hostname: "{{ ansible_hostname | default(inventory_hostname) }}"
 
-    # --- RHEL SECTION ---
-    - name: 2. Patch RedHat
+    # --- RHEL / CENTOS SECTION ---
+    - name: 2. Patch RedHat Family
       block:
-        - name: RHEL | Upgrade
-          dnf: { name: "*", state: latest, skip_if_unavailable: yes }
+        - name: RHEL | Ensure yum-utils is present (for reboot check)
+          package:
+            name: yum-utils
+            state: present
+          when: ansible_distribution_major_version == "7"
+
+        - name: RHEL | Upgrade Packages
+          package:
+            name: "*"
+            state: latest
           register: rhel_out
-        - name: RHEL | Check Reboot
+
+        - name: RHEL | Check if reboot is required
           command: needs-restarting -r
           register: rhel_reboot_check
           ignore_errors: yes
           changed_when: false
-        - name: RHEL | Record
+
+        - name: RHEL | Record Status
           set_fact:
             patch_status: "{{ 'Success' if rhel_out.changed else 'No updates needed' }}"
             reboot_required: "{{ 'Yes' if rhel_reboot_check.rc | default(0) != 0 else 'No' }}"
       when: ansible_os_family == "RedHat"
       rescue:
-        - set_fact: { patch_status: "Failed" }
+        - set_fact:
+            patch_status: "Failed"
 
-    # --- DEBIAN SECTION ---
-    - name: 3. Patch Debian
+    # --- DEBIAN / UBUNTU SECTION ---
+    - name: 3. Patch Debian Family
       block:
         - name: Debian | Upgrade
-          apt: { upgrade: dist, update_cache: yes }
+          apt:
+            upgrade: dist
+            update_cache: yes
           register: deb_out
+
         - name: Debian | Check Reboot
-          stat: { path: /var/run/reboot-required }
+          stat:
+            path: /var/run/reboot-required
           register: reboot_file
-        - name: Debian | Record
+
+        - name: Debian | Record Status
           set_fact:
             patch_status: "{{ 'Success' if deb_out.changed else 'No updates needed' }}"
             reboot_required: "{{ 'Yes' if reboot_file.stat.exists else 'No' }}"
       when: ansible_os_family == "Debian"
       rescue:
-        - set_fact: { patch_status: "Failed" }
+        - set_fact:
+            patch_status: "Failed"
 
     # --- REPORT & EMAIL ---
-    - name: 4. Build Report
+    - name: 4. Build Report Header
       run_once: true
       delegate_to: localhost
       become: no
       copy:
         dest: "{{ report_file }}"
-        content: "Hostname,IP,OS,Status,Reboot_Required,Timestamp\n"
+        content: "Hostname,IP,OS_Version,Status,Reboot_Required,Timestamp\n"
 
-    - name: 5. Append data
+    - name: 5. Append host data to CSV
       delegate_to: localhost
       become: no
       lineinfile:
         path: "{{ report_file }}"
-        line: "{{ inventory_hostname }},{{ ansible_default_ipv4.address }},{{ ansible_os_family }},{{ patch_status }},{{ reboot_required }},{{ ansible_date_time.iso8601 }}"
+        line: "{{ actual_hostname }},{{ ansible_default_ipv4.address }},{{ full_os_name }},{{ patch_status }},{{ reboot_required }},{{ ansible_date_time.iso8601 }}"
 
     - name: 6. Send Email
       run_once: true
       delegate_to: localhost
       become: no
-      community.general.mail: # Use FQCN here
+      community.general.mail:
         host: "{{ smtp_server }}"
         port: "{{ smtp_port }}"
         username: "{{ smtp_user }}"
@@ -80,5 +99,5 @@
         secure: starttls
         to: "{{ email_recipient }}"
         subject: "PROD AUDIT: OS Patching Report"
-        body: "Patching complete. CSV attached."
+        body: "Patching complete. Please find the attached audit report for your RHEL and Ubuntu fleet."
         attach: "{{ report_file }}"
