@@ -21,10 +21,11 @@
     # --- RHEL / CENTOS SECTION ---
     - name: 2. Patch RedHat Family
       block:
-        - name: RHEL | Install reboot check tools
+        - name: RHEL | Attempt to install reboot check tools
           package:
             name: yum-utils
             state: present
+          ignore_errors: yes  # If the repo is broken, don't stop the whole playbook
 
         - name: RHEL | Upgrade Packages
           package:
@@ -37,17 +38,17 @@
             if command -v needs-restarting >/dev/null 2>&1; then
               needs-restarting -r
             else
-              echo "not-applicable"
+              echo "tool-missing"
             fi
           register: rhel_reboot_check
-          # rc 1 means reboot needed, rc 0 means no reboot. Both are valid.
           failed_when: rhel_reboot_check.rc not in [0, 1]
           changed_when: false
 
         - name: RHEL | Record Status
           set_fact:
             patch_status: "{{ 'Success' if rhel_out.changed else 'No updates needed' }}"
-            reboot_required: "{{ 'Yes' if rhel_reboot_check.rc == 1 else 'No' }}"
+            reboot_required: >-
+              {% if rhel_reboot_check.rc == 1 %}Yes{% elif rhel_reboot_check.stdout == 'tool-missing' %}Unknown (Missing Tools){% else %}No{% endif %}
       when: ansible_os_family == "RedHat"
       rescue:
         - set_fact:
@@ -88,6 +89,7 @@
     - name: 5. Append host data to CSV
       delegate_to: localhost
       become: no
+      # Throttle prevents multiple hosts from writing to the file at once
       throttle: 1
       lineinfile:
         path: "{{ report_file }}"
@@ -106,5 +108,5 @@
         secure: starttls
         to: "{{ email_recipient }}"
         subject: "PROD AUDIT: OS Patching Report"
-        body: "Patching cycle complete. Attached is the audit report for RHEL and Debian/Ubuntu systems."
+        body: "Patching cycle complete. Attached is the audit report."
         attach: "{{ report_file }}"
