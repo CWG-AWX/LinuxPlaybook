@@ -18,14 +18,13 @@
         full_os_name: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
         actual_hostname: "{{ ansible_hostname | default(inventory_hostname) }}"
 
-    # --- RHEL / CENTOS SECTION ---
+    # --- RHEL / CENTOS SECTION (7, 8, 9, 10) ---
     - name: 2. Patch RedHat Family
       block:
-        - name: RHEL | Ensure yum-utils is present (for reboot check)
+        - name: RHEL | Install reboot check tools
           package:
-            name: yum-utils
+            name: "{{ (ansible_distribution_major_version | int >= 8) | ternary('dnf-utils', 'yum-utils') }}"
             state: present
-          when: ansible_distribution_major_version == "7"
 
         - name: RHEL | Upgrade Packages
           package:
@@ -34,7 +33,12 @@
           register: rhel_out
 
         - name: RHEL | Check if reboot is required
-          command: needs-restarting -r
+          shell: |
+            if command -v needs-restarting >/dev/null 2>&1; then
+              needs-restarting -r
+            else
+              echo "not-applicable"
+            fi
           register: rhel_reboot_check
           ignore_errors: yes
           changed_when: false
@@ -42,7 +46,8 @@
         - name: RHEL | Record Status
           set_fact:
             patch_status: "{{ 'Success' if rhel_out.changed else 'No updates needed' }}"
-            reboot_required: "{{ 'Yes' if rhel_reboot_check.rc | default(0) != 0 else 'No' }}"
+            reboot_required: >-
+              {{ 'Yes' if rhel_reboot_check.rc is defined and rhel_reboot_check.rc != 0 and rhel_reboot_check.stdout != 'not-applicable' else 'No' }}
       when: ansible_os_family == "RedHat"
       rescue:
         - set_fact:
@@ -71,7 +76,7 @@
         - set_fact:
             patch_status: "Failed"
 
-    # --- REPORT & EMAIL ---
+    # --- REPORT GENERATION ---
     - name: 4. Build Report Header
       run_once: true
       delegate_to: localhost
@@ -83,9 +88,11 @@
     - name: 5. Append host data to CSV
       delegate_to: localhost
       become: no
+      throttle: 1
       lineinfile:
         path: "{{ report_file }}"
         line: "{{ actual_hostname }},{{ ansible_default_ipv4.address }},{{ full_os_name }},{{ patch_status }},{{ reboot_required }},{{ ansible_date_time.iso8601 }}"
+      ignore_errors: yes
 
     - name: 6. Send Email
       run_once: true
@@ -99,5 +106,5 @@
         secure: starttls
         to: "{{ email_recipient }}"
         subject: "PROD AUDIT: OS Patching Report"
-        body: "Patching complete. Please find the attached audit report for your RHEL and Ubuntu fleet."
+        body: "Patching cycle complete. Please find the attached audit report for RHEL and Debian/Ubuntu systems."
         attach: "{{ report_file }}"
