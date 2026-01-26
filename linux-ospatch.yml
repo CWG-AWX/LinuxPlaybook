@@ -2,7 +2,6 @@
 - name: Multi-OS Security Patching & Audit Reporting
   hosts: all
   become: yes
-  # Loophole 3 Fix: Allows the playbook to continue to the reporting task even if a host is offline
   ignore_unreachable: yes
   vars:
     report_file: "/tmp/patch_audit_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
@@ -17,7 +16,6 @@
       set_fact:
         patch_status: "No updates needed"
         reboot_required: "No"
-        # Loophole 2 Fix: Fallback for IP and OS facts if gathering failed or host is weird
         reporting_ip: "{{ ansible_default_ipv4.address | default(ansible_all_ipv4_addresses[0] | default(inventory_hostname)) }}"
         full_os_name: "{{ ansible_distribution | default('Unknown') }} {{ ansible_distribution_version | default('OS') }}"
         actual_hostname: "{{ ansible_hostname | default(inventory_hostname) }}"
@@ -103,7 +101,6 @@
       throttle: 1
       lineinfile:
         path: "{{ report_file }}"
-        # Uses the reporting_ip variable which has the fallback logic
         line: "{{ actual_hostname }},{{ reporting_ip }},{{ full_os_name }},{{ patch_status }},{{ reboot_required }},{{ ansible_date_time.iso8601 | default(lookup('pipe','date --iso-8601=seconds')) }}"
       ignore_errors: yes
 
