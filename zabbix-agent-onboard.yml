@@ -7,7 +7,7 @@
     zabbix_version: "7.0" 
 
   tasks:
-    # --- PRE-FLIGHT: CLEANUP & DEPENDENCIES ---
+    # --- PRE-FLIGHT: DEPENDENCIES ---
     - name: 1. Install Python dependencies (Silent Install)
       package:
         name: "{{ (ansible_os_family == 'RedHat') | ternary('python3-firewall', 'python3-apt') }}"
@@ -19,7 +19,7 @@
       block:
         - name: RHEL | Install Repository RPM
           yum:
-            name: "https://repo.zabbix.com/zabbix/{{ zabbix_version }}/rhel/{{ ansible_distribution_major_version  }}/x86_64/zabbix-release-latest.el{{ ansible_distribution_major_version }}.noarch.rpm"
+            name: "https://repo.zabbix.com/zabbix/{{ zabbix_version }}/rhel/{{ ansible_distribution_major_version }}/x86_64/zabbix-release-latest.el{{ ansible_distribution_major_version }}.noarch.rpm"
             state: present
             disable_gpg_check: yes
 
@@ -37,25 +37,21 @@
           command: dpkg --configure -a
           changed_when: false
 
-        - name: Debian | Check if Zabbix repo is already configured
-          stat:
-            path: /etc/apt/sources.list.d/zabbix.list
-          register: zabbix_repo_stat
-
         - name: Debian | Download Repository Deb
           get_url:
             url: "https://repo.zabbix.com/zabbix/{{ zabbix_version }}/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest+ubuntu{{ ansible_distribution_version }}_all.deb"
             dest: "/tmp/zabbix-release.deb"
             timeout: 30
           register: deb_dl
-          when: not zabbix_repo_stat.stat.exists
 
         - name: Debian | Install Repository Deb
           apt:
             deb: "/tmp/zabbix-release.deb"
-          when: 
-            - not zabbix_repo_stat.stat.exists
-            - deb_dl is successful
+          register: apt_install_result
+          # Logic: Ignore the error if the repo is already there or newer
+          failed_when: 
+            - apt_install_result.failed
+            - "'A later version is already installed' not in apt_install_result.msg | default('')"
 
         - name: Debian | Install Zabbix Agent
           apt:
@@ -78,14 +74,17 @@
         - { regexp: '^Hostname=', line: "Hostname={{ ansible_hostname }}" }
       notify: Restart Zabbix Agent
 
-    - name: 5. Ensure Service is Running
+    - name: 5. Ensure Service is Started
       service:
         name: zabbix-agent
         state: started
         enabled: yes
 
-    # --- PASSIVE FIREWALL LOGIC (Non-Intrusive) ---
-    - name: 6. RHEL | Add Port 10050 IF firewalld is already active
+    # --- PASSIVE FIREWALL LOGIC (SAFE MODE) ---
+    - name: 6. Gather Service Facts
+      service_facts:
+
+    - name: 7. RHEL | Add Port 10050 IF firewalld is active
       ansible.posix.firewalld:
         port: 10050/tcp
         permanent: yes
@@ -96,7 +95,7 @@
         - ansible_facts.services['firewalld.service'] is defined 
         - ansible_facts.services['firewalld.service'].state == 'running'
 
-    - name: 6. Debian | Add Port 10050 IF UFW is already active
+    - name: 8. Debian | Add Port 10050 IF UFW is active
       community.general.ufw:
         rule: allow
         port: "10050"
