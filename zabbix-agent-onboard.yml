@@ -4,7 +4,7 @@
   become: yes
   vars:
     zabbix_server_ip: "192.168.184.84" 
-    zabbix_version: "7.2.7"
+    zabbix_version: "7.4.5"
 
   tasks:
 
