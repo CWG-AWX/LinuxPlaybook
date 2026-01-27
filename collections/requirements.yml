@@ -1,4 +1,4 @@
 ---
 collections:
-  - name: https://galaxy.ansible.com/download/nutanix-ncp-2.4.0.tar.gz
+  - name: https://galaxy.ansible.com/download/nutanix-ncp-1.9.1.tar.gz
   - name: https://galaxy.ansible.com/download/community-general-8.2.0.tar.gz
