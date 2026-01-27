@@ -1,0 +1,18 @@
+---
+- name: Debug Environment
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Check for Nutanix Python SDK
+      command: pip show nutanix-python-sdk
+      register: pip_result
+      ignore_errors: yes
+
+    - name: List installed Collections
+      command: ansible-galaxy collection list
+      register: galaxy_result
+
+    - debug:
+        msg: 
+          - "PIP Status: {{ pip_result.stdout if pip_result.rc == 0 else 'NOT INSTALLED' }}"
+          - "Collections found: {{ galaxy_result.stdout }}"
