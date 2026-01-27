@@ -4,26 +4,20 @@
   gather_facts: no
   become: no
   tasks:
-    - name: FORCE INSTALL | Correct Nutanix SDK Clients
-      pip:
-        name: 
-          - ntnx-prism-py-client
-          - ntnx-vmm-py-client
-        state: present
-      register: pip_install_out
+    - name: FORCE INSTALL | Nutanix SDK
+      # We use 'python3 -m pip' to ensure it uses the exact same version as the runner
+      command: python3 -m pip install ntnx-prism-py-client ntnx-vmm-py-client --user
+      changed_when: true
 
-    - name: VERIFY | Check Pip Show for Prism Client
-      command: pip show ntnx-prism-py-client
-      register: pip_result
-      ignore_errors: yes
-
-    - name: VERIFY | Test Python Import
-      # The internal import name uses underscores
-      command: python3 -c "import ntnx_prism_py_client; import ntnx_vmm_py_client; print('Import Successful')"
+    - name: VERIFY | Test Python Import with Path Fix
+      shell: |
+        # This line tells Python to look in the 'user' folder we just installed to
+        export PYTHONPATH=$PYTHONPATH:$(python3 -m site --user-site)
+        python3 -c "import ntnx_prism_py_client; import ntnx_vmm_py_client; print('IMPORT SUCCESSFUL')"
       register: import_test
       ignore_errors: yes
 
     - debug:
         msg: 
-          - "Install Status: {{ 'SUCCESS' if pip_install_out.changed or pip_result.rc == 0 else 'FAILED' }}"
-          - "Python Import: {{ import_test.stdout if import_test.rc == 0 else 'IMPORT FAILED' }}"
+          - "Python Import: {{ import_test.stdout if import_test.rc == 0 else 'STILL FAILING' }}"
+          - "User Site Path: {{ import_test.stderr if import_test.rc != 0 }}"
