@@ -1,23 +1,40 @@
 ---
-- name: Debug and Force Install Environment
+- name: Hard Recovery - Nutanix SDK Installation
   hosts: localhost
   gather_facts: no
   become: no
-  tasks:
-    - name: FORCE INSTALL | Nutanix SDK
-      # We use 'python3 -m pip' to ensure it uses the exact same version as the runner
-      command: python3 -m pip install ntnx-prism-py-client ntnx-vmm-py-client --user
-      changed_when: true
 
-    - name: VERIFY | Test Python Import with Path Fix
+  tasks:
+    - name: 1. FORCE INSTALL | Using Binary Path
+      # We use 'shell' to bypass the missing python-pip module
+      # We use '--user' because the system folders are read-only
       shell: |
-        # This line tells Python to look in the 'user' folder we just installed to
-        export PYTHONPATH=$PYTHONPATH:$(python3 -m site --user-site)
-        python3 -c "import ntnx_prism_py_client; import ntnx_vmm_py_client; print('IMPORT SUCCESSFUL')"
+        /usr/bin/pip install ntnx-prism-py-client ntnx-vmm-py-client --user
+      register: pip_binary_out
+      changed_when: "'Successfully installed' in pip_binary_out.stdout"
+
+    - name: 2. VERIFY | Locate User Site Packages
+      # We need to find exactly where the container puts '--user' installs
+      shell: python3 -m site --user-site
+      register: user_site_path
+      changed_when: false
+
+    - name: 3. FINAL TEST | Import with Path Injection
+      # We manually add the user-site to the PYTHONPATH for this command
+      shell: |
+        export PYTHONPATH=$PYTHONPATH:{{ user_site_path.stdout }}
+        python3 -c "import ntnx_prism_py_client; import ntnx_vmm_py_client; print('SUCCESS: Nutanix SDK is readable!')"
       register: import_test
       ignore_errors: yes
 
-    - debug:
+    - name: 4. REPORT | Results
+      debug:
         msg: 
-          - "Python Import: {{ import_test.stdout if import_test.rc == 0 else 'STILL FAILING' }}"
-          - "User Site Path: {{ import_test.stderr if import_test.rc != 0 }}"
+          - "Pip Binary Output: {{ pip_binary_out.stdout_lines[-1] | default('Already Installed') }}"
+          - "Library Path: {{ user_site_path.stdout }}"
+          - "Final Result: {{ import_test.stdout if import_test.rc == 0 else 'IMPORT STILL FAILING' }}"
+
+    - name: 5. CRITICAL FAILURE LOG
+      debug:
+        var: import_test.stderr
+      when: import_test.rc != 0
