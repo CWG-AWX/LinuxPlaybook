@@ -4,19 +4,22 @@
   gather_facts: no
   become: no
   tasks:
-    - name: FORCE INSTALL | Nutanix Python SDK
+    - name: FORCE INSTALL | Correct Nutanix SDK Clients
       pip:
-        name: nutanix-python-sdk
+        name: 
+          - ntnx-prism-py-client
+          - ntnx-vmm-py-client
         state: present
       register: pip_install_out
 
-    - name: VERIFY | Check Pip Show
-      command: pip show nutanix-python-sdk
+    - name: VERIFY | Check Pip Show for Prism Client
+      command: pip show ntnx-prism-py-client
       register: pip_result
       ignore_errors: yes
 
     - name: VERIFY | Test Python Import
-      command: python3 -c "import nutanix_prism_py_client; print('Import Successful')"
+      # The internal import name uses underscores
+      command: python3 -c "import ntnx_prism_py_client; import ntnx_vmm_py_client; print('Import Successful')"
       register: import_test
       ignore_errors: yes
 
@@ -24,4 +27,3 @@
         msg: 
           - "Install Status: {{ 'SUCCESS' if pip_install_out.changed or pip_result.rc == 0 else 'FAILED' }}"
           - "Python Import: {{ import_test.stdout if import_test.rc == 0 else 'IMPORT FAILED' }}"
-          - "SDK Path: {{ pip_result.stdout_lines[4] if pip_result.rc == 0 else 'N/A' }}"
