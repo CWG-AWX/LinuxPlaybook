@@ -1,3 +1,4 @@
+---
 plugin: nutanix.ncp.inventory
 include_vms_with_power_state:
   - 'on'
@@ -7,4 +8,3 @@ keyed_groups:
   - prefix: nutanix_vlan
     key: subnet_name
     separator: "_"
-strict: false
