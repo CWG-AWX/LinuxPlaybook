@@ -2,7 +2,9 @@
 - name: Ping all servers
   hosts: all
   gather_facts: no
+  ignore_unreachable: yes
 
   tasks:
     - name: Ping hosts
       ansible.builtin.ping:
+      ignore_errors: yes
