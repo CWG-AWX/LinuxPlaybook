@@ -1,18 +1,27 @@
 ---
-- name: Debug Environment
+- name: Debug and Force Install Environment
   hosts: localhost
   gather_facts: no
+  become: no
   tasks:
-    - name: Check for Nutanix Python SDK
+    - name: FORCE INSTALL | Nutanix Python SDK
+      pip:
+        name: nutanix-python-sdk
+        state: present
+      register: pip_install_out
+
+    - name: VERIFY | Check Pip Show
       command: pip show nutanix-python-sdk
       register: pip_result
       ignore_errors: yes
 
-    - name: List installed Collections
-      command: ansible-galaxy collection list
-      register: galaxy_result
+    - name: VERIFY | Test Python Import
+      command: python3 -c "import nutanix_prism_py_client; print('Import Successful')"
+      register: import_test
+      ignore_errors: yes
 
     - debug:
         msg: 
-          - "PIP Status: {{ pip_result.stdout if pip_result.rc == 0 else 'NOT INSTALLED' }}"
-          - "Collections found: {{ galaxy_result.stdout }}"
+          - "Install Status: {{ 'SUCCESS' if pip_install_out.changed or pip_result.rc == 0 else 'FAILED' }}"
+          - "Python Import: {{ import_test.stdout if import_test.rc == 0 else 'IMPORT FAILED' }}"
+          - "SDK Path: {{ pip_result.stdout_lines[4] if pip_result.rc == 0 else 'N/A' }}"
