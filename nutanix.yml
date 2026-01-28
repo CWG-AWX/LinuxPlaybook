@@ -1,16 +1,20 @@
 ---
 plugin: nutanix.ncp.ntnx_prism_vm_inventory
-# Use 'nutanix_hostname' instead of 'nutanix_host'
 nutanix_hostname: "10.20.24.5" 
 #nutanix_username: ""
 #nutanix_password: "" 
 validate_certs: false
+hostvars_prefix: "ntnx_"
 
 include_vms_with_power_state:
   - 'on'
 compose:
   ansible_host: address_ips[0]
 keyed_groups:
-  - prefix: nutanix_vlan
-    key: subnet_name
+  - prefix: vlan
+    key: ntnx_nic_list | map(attribute='subnet_name') | list
     separator: "_"
+#keyed_groups:
+#  - prefix: nutanix_vlan
+#    key: subnet_name
+#    separator: "_"
