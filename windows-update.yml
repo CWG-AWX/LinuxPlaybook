@@ -4,12 +4,15 @@
   gather_facts: yes
   
   vars:
+    # --- REPORTING DEFAULTS ---
     report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
+    email_recipient: "michael.obateru@cwg-plc.com"
+
+    # --- SMTP CONFIGURATION ---
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
-    # The following variables come from your Survey/Vault (matching Linux playbook)
     smtp_user: "ignioservices@gmail.com"
-    # smtp_pass: "{{ vault_smtp_password }}"  <-- This is what we use in the mail task
+    # Note: vault_smtp_password must be provided via your AWX Vault or Survey
 
   tasks:
     - name: 1. Initialize reporting variables
@@ -29,9 +32,8 @@
               - UpdateRollups
             state: installed
             reboot: yes
-            reboot_timeout: 7200    # 2 Hours (Allows for slow Nutanix I/O)
+            reboot_timeout: 7200    # 2 Hours
           register: update_result
-          # Note: async removed because reboot:yes handles its own monitoring
 
         - name: Windows | Record Results
           set_fact:
@@ -44,7 +46,7 @@
             patch_status: "Failed"
             reboot_status: "Error: {{ ansible_failed_result.msg | default('Unknown') }}"
 
-    # --- REPORT GENERATION ---
+    # --- REPORT GENERATION (LOCAL HOST) ---
 
     - name: 3. Create CSV Header
       run_once: true
@@ -71,10 +73,10 @@
         host: "{{ smtp_server }}"
         port: "{{ smtp_port }}"
         username: "{{ smtp_user }}"
-        password: "{{ vault_smtp_password }}"  # Matches your Linux variable name
+        password: "{{ vault_smtp_password }}"
         secure: starttls
         to: "{{ email_recipient }}"
         subject: "PROD WINDOWS AUDIT: Patching Report Complete"
-        body: "Windows patching cycle is complete. Attached is the audit report for the Nutanix environment."
+        body: "Windows patching cycle is complete. Attached is the audit report."
         attach: "{{ report_file }}"
       when: report_file is exists
