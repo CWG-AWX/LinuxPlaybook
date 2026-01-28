@@ -2,6 +2,8 @@
 plugin: nutanix.ncp.ntnx_prism_vm_inventory
 # Use 'nutanix_hostname' instead of 'nutanix_host'
 nutanix_hostname: "10.20.24.5" 
+nutanix_username: "{{ lookup('env', 'NUTANIX_USERNAME') }}"
+nutanix_password: "{{ lookup('env', 'NUTANIX_PASSWORD') }}"
 #nutanix_username: "michael"
 #nutanix_password: "Oba@2024" 
 validate_certs: false
