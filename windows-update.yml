@@ -4,40 +4,39 @@
   gather_facts: yes
   
   vars:
-    # --- REPORTING DEFAULTS ---
     report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
     email_recipient: "michael.obateru@cwg-plc.com"
-
-    # --- SMTP CONFIGURATION ---
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
-    # Note: vault_smtp_password must be provided via your AWX Vault or Survey
 
   tasks:
     - name: 1. Initialize reporting variables
       set_fact:
         patch_status: "No updates needed"
         reboot_status: "No reboot performed"
-        reporting_ip: "{{ ansible_ip_addresses[0] | default(inventory_hostname) }}"
+        # FIX: Use ansible_host for clean IPv4 reporting
+        reporting_ip: "{{ ansible_host | default(inventory_hostname) }}"
         full_os_name: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
 
-    - name: 2. Execute Windows Updates
+    - name: 2. Execute Comprehensive Windows Updates
       block:
-        - name: Windows | Search and Install Updates
+        - name: Windows | Search and Install All Updates
           ansible.windows.win_updates:
             category_names:
               - SecurityUpdates
               - CriticalUpdates
               - UpdateRollups
+              - DefinitionUpdates  # This catches the Defender KB you saw
+              - Updates            # Catches other non-critical but necessary fixes
             state: installed
             reboot: yes
-            reboot_timeout: 7200    # 2 Hours
+            reboot_timeout: 7200
           register: update_result
 
         - name: Windows | Record Results
           set_fact:
-            patch_status: "{{ 'Success' if update_result.changed else 'No updates needed' }}"
+            patch_status: "{{ 'Success (' + (update_result.installed_update_count | string) + ' updates)' if update_result.changed else 'No updates needed' }}"
             reboot_status: "{{ 'Reboot Completed' if update_result.reboot_required else 'No reboot needed' }}"
 
       rescue:
@@ -46,7 +45,7 @@
             patch_status: "Failed"
             reboot_status: "Error: {{ ansible_failed_result.msg | default('Unknown') }}"
 
-    # --- REPORT GENERATION (LOCAL HOST) ---
+    # --- REPORT GENERATION ---
 
     - name: 3. Create CSV Header
       run_once: true
@@ -77,6 +76,6 @@
         secure: starttls
         to: "{{ email_recipient }}"
         subject: "PROD WINDOWS AUDIT: Patching Report Complete"
-        body: "Windows patching cycle is complete. Attached is the audit report."
+        body: "Windows patching cycle is complete. The report now includes Definition Updates and IPv4 corrections."
         attach: "{{ report_file }}"
       when: report_file is exists
