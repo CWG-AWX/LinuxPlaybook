@@ -1,12 +1,11 @@
 ---
 plugin: nutanix.ncp.ntnx_prism_vm_inventory
-# Mandatory fields for the plugin to "verify" the file
-nutanix_host: "10.20.24.5"
+# Use 'nutanix_hostname' instead of 'nutanix_host'
+nutanix_hostname: "10.20.24.5" 
 nutanix_username: "michael"
 nutanix_password: "Oba@2024" 
 validate_certs: false
 
-# Your filtering logic
 include_vms_with_power_state:
   - 'on'
 compose:
