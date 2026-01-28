@@ -2,22 +2,20 @@
 - name: Windows Multi-Host Security Patching & Audit Reporting
   hosts: all
   gather_facts: yes
-  # Ensure your AWX credential is set to the 'ansible_svc' user
   
   vars:
     report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
+    # The following variables come from your Survey/Vault (matching Linux playbook)
     smtp_user: "ignioservices@gmail.com"
-    smtp_pass: "{{ vault_smtp_password }}" 
-    email_recipient: "michael.obateru@cwg-plc.com"
+    # smtp_pass: "{{ vault_smtp_password }}"  <-- This is what we use in the mail task
 
   tasks:
     - name: 1. Initialize reporting variables
       set_fact:
         patch_status: "No updates needed"
         reboot_status: "No reboot performed"
-        # Windows specific IP fact
         reporting_ip: "{{ ansible_ip_addresses[0] | default(inventory_hostname) }}"
         full_os_name: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
 
@@ -31,10 +29,9 @@
               - UpdateRollups
             state: installed
             reboot: yes
-            reboot_timeout: 7200    # 2 Hours (7200 seconds)
+            reboot_timeout: 7200    # 2 Hours (Allows for slow Nutanix I/O)
           register: update_result
-          async: 14400              # 4 Hours (14400 seconds)
-          poll: 300                 # 5 Minutes (300 seconds)
+          # Note: async removed because reboot:yes handles its own monitoring
 
         - name: Windows | Record Results
           set_fact:
@@ -45,9 +42,9 @@
         - name: Handle Windows Update Failures
           set_fact:
             patch_status: "Failed"
-            reboot_status: "Error during update process"
+            reboot_status: "Error: {{ ansible_failed_result.msg | default('Unknown') }}"
 
-    # --- REPORT GENERATION (Local Tasks) ---
+    # --- REPORT GENERATION ---
 
     - name: 3. Create CSV Header
       run_once: true
@@ -74,10 +71,10 @@
         host: "{{ smtp_server }}"
         port: "{{ smtp_port }}"
         username: "{{ smtp_user }}"
-        password: "{{ smtp_pass }}"
+        password: "{{ vault_smtp_password }}"  # Matches your Linux variable name
         secure: starttls
         to: "{{ email_recipient }}"
         subject: "PROD WINDOWS AUDIT: Patching Report Complete"
-        body: "Windows patching cycle is complete for the targeted group. Please find the attached audit report for all 325 hosts."
+        body: "Windows patching cycle is complete. Attached is the audit report for the Nutanix environment."
         attach: "{{ report_file }}"
       when: report_file is exists
