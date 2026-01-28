@@ -1,5 +1,5 @@
 ---
-plugin: nutanix.ncp.nutanix_inventory
+plugin: nutanix.ncp.ntnx_prism_vm_inventory
 include_vms_with_power_state:
   - 'on'
 compose:
