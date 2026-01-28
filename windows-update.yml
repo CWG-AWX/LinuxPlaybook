@@ -1,0 +1,83 @@
+---
+- name: Windows Multi-Host Security Patching & Audit Reporting
+  hosts: all
+  gather_facts: yes
+  # Ensure your AWX credential is set to the 'ansible_svc' user
+  
+  vars:
+    report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
+    smtp_server: "smtp.gmail.com"
+    smtp_port: 587
+    smtp_user: "ignioservices@gmail.com"
+    smtp_pass: "{{ vault_smtp_password }}" 
+    email_recipient: "michael.obateru@cwg-plc.com"
+
+  tasks:
+    - name: 1. Initialize reporting variables
+      set_fact:
+        patch_status: "No updates needed"
+        reboot_status: "No reboot performed"
+        # Windows specific IP fact
+        reporting_ip: "{{ ansible_ip_addresses[0] | default(inventory_hostname) }}"
+        full_os_name: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+
+    - name: 2. Execute Windows Updates
+      block:
+        - name: Windows | Search and Install Updates
+          ansible.windows.win_updates:
+            category_names:
+              - SecurityUpdates
+              - CriticalUpdates
+              - UpdateRollups
+            state: installed
+            reboot: yes
+            reboot_timeout: 7200    # 2 Hours (7200 seconds)
+          register: update_result
+          async: 14400              # 4 Hours (14400 seconds)
+          poll: 300                 # 5 Minutes (300 seconds)
+
+        - name: Windows | Record Results
+          set_fact:
+            patch_status: "{{ 'Success' if update_result.changed else 'No updates needed' }}"
+            reboot_status: "{{ 'Reboot Completed' if update_result.reboot_required else 'No reboot needed' }}"
+
+      rescue:
+        - name: Handle Windows Update Failures
+          set_fact:
+            patch_status: "Failed"
+            reboot_status: "Error during update process"
+
+    # --- REPORT GENERATION (Local Tasks) ---
+
+    - name: 3. Create CSV Header
+      run_once: true
+      delegate_to: localhost
+      become: no
+      copy:
+        dest: "{{ report_file }}"
+        content: "Hostname,IP_Address,OS_Version,Patch_Status,Reboot_Action,Timestamp\n"
+
+    - name: 4. Append host data to CSV
+      delegate_to: localhost
+      become: no
+      throttle: 1
+      lineinfile:
+        path: "{{ report_file }}"
+        line: "{{ inventory_hostname }},{{ reporting_ip }},{{ full_os_name }},{{ patch_status }},{{ reboot_status }},{{ lookup('pipe','date --iso-8601=seconds') }}"
+      ignore_errors: yes
+
+    - name: 5. Email Final Report
+      run_once: true
+      delegate_to: localhost
+      become: no
+      community.general.mail:
+        host: "{{ smtp_server }}"
+        port: "{{ smtp_port }}"
+        username: "{{ smtp_user }}"
+        password: "{{ smtp_pass }}"
+        secure: starttls
+        to: "{{ email_recipient }}"
+        subject: "PROD WINDOWS AUDIT: Patching Report Complete"
+        body: "Windows patching cycle is complete for the targeted group. Please find the attached audit report for all 325 hosts."
+        attach: "{{ report_file }}"
+      when: report_file is exists
