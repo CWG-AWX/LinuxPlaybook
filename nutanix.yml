@@ -4,6 +4,7 @@ nutanix_hostname: "10.20.24.5"
 #nutanix_username: ""
 #nutanix_password: "" 
 validate_certs: false
+fetch_all_entities: true
 hostvars_prefix: "ntnx_"
 
 include_vms_with_power_state:
