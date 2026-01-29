@@ -6,12 +6,14 @@ nutanix_hostname: "10.20.24.5"
 validate_certs: false
 fetch_all_entities: true
 hostvars_prefix: "ntnx_"
-where: "ip_addresses != ''"
 include_vms_with_power_state:
   - 'on'
   
 compose:
   ansible_host: address_ips[0]
+  ignore_host: address_ips | length == 0
+exclude:
+  - ntnx_ignore_host
 keyed_groups:
   - prefix: vlan
     key: ntnx_nic_list | map(attribute='subnet_name') | list
