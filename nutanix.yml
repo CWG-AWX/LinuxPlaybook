@@ -6,10 +6,10 @@ nutanix_hostname: "10.20.24.5"
 validate_certs: false
 fetch_all_entities: true
 hostvars_prefix: "ntnx_"
-
+where: "ip_addresses != ''"
 include_vms_with_power_state:
   - 'on'
-filters: "len(address_ips) > 0"
+  
 compose:
   ansible_host: address_ips[0]
 keyed_groups:
