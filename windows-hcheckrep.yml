@@ -9,6 +9,14 @@
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
+    # Services that might not exist on all server roles
+    critical_services:
+      - Dhcp
+      - Dnscache
+      - LanmanServer
+      - WinRM
+      - W3SVC          # Web servers only
+      - MSSQLSERVER    # SQL servers only
 
   tasks:
     - name: 1. Initialize health metrics
@@ -32,63 +40,107 @@
         }
       register: disk_check
       changed_when: false
+      ignore_errors: yes
 
-    - name: 3. Check critical services
+    - name: 3. Check critical services (gracefully handle missing services)
       win_service:
         name: "{{ item }}"
         state: started
-      loop:
-        - Dhcp
-        - Dnscache
-        - LanmanServer
-        - WinRM
-      ignore_errors: yes
+      loop: "{{ critical_services }}"
+      ignore_errors: yes  # Critical: prevents playbook failure on missing services
       register: service_check
 
-    - name: 4. Evaluate service health
+    - name: 4. Evaluate service health (safe attribute access)
+      set_fact:
+        failed_services: >-
+          {{
+            service_check.results
+            | selectattr('status', 'defined')
+            | rejectattr('status', 'equalto', 'running')
+            | map(attribute='name')
+            | list
+          }}
+        missing_services: >-
+          {{
+            service_check.results
+            | rejectattr('status', 'defined')
+            | map(attribute='name')
+            | list
+          }}
+      no_log: true  # Avoid leaking service names in logs
+
+    - name: 5. Format service status string
       set_fact:
         service_status: >-
           {{
-            service_check.results | rejectattr('status', 'equalto', 'running') | list | length > 0 |
-            ternary(
-              'FAILED: ' + (service_check.results | rejectattr('status', 'equalto', 'running') | map(attribute='name') | join(', ')),
-              'OK'
+            (failed_services | length > 0) | ternary(
+              'FAILED: ' + failed_services | join(', '),
+              (missing_services | length > 0) | ternary(
+                'MISSING: ' + missing_services | join(', '),
+                'OK'
+              )
             )
           }}
 
-    - name: 5. Get CPU/Memory usage
+    - name: 6. Get CPU/Memory usage
       win_shell: |
-        $cpu = (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 3).CounterSamples.CookedValue | Measure-Object -Average | % Average
-        $mem = Get-CimInstance Win32_OperatingSystem
-        $memUsed = 100 - ($mem.FreePhysicalMemory / $mem.TotalVisibleMemorySize * 100)
-        "$([math]::Round($cpu,1)),$([math]::Round($memUsed,1))"
+        try {
+          $cpu = (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 3 -ErrorAction Stop).CounterSamples.CookedValue | Measure-Object -Average | % Average
+        } catch {
+          $cpu = "N/A"
+        }
+        try {
+          $mem = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+          $memUsed = 100 - ($mem.FreePhysicalMemory / $mem.TotalVisibleMemorySize * 100)
+        } catch {
+          $memUsed = "N/A"
+        }
+        "$cpu,$memUsed"
       register: perf_check
       changed_when: false
+      ignore_errors: yes
 
-    - name: 6. Parse performance metrics
+    - name: 7. Parse performance metrics safely
       set_fact:
-        cpu_usage: "{{ perf_check.stdout.split(',')[0] | default('N/A') }}"
-        mem_usage: "{{ perf_check.stdout.split(',')[1] | default('N/A') }}"
+        cpu_usage: "{{ perf_check.stdout.split(',')[0] | default('N/A') | trim }}"
+        mem_usage: "{{ perf_check.stdout.split(',')[1] | default('N/A') | trim }}"
 
-    - name: 7. Create CSV header (run once on controller)
+    - name: 8. Create CSV header (run ONCE on controller before any hosts)
       run_once: true
       delegate_to: localhost
       become: no
       copy:
         dest: "{{ report_file }}"
         content: "Hostname,IP_Address,OS_Version,Disk_Status,CPU_Usage(%),Memory_Usage(%),Service_Status,Timestamp\n"
-      when: ansible_play_hosts.index(inventory_hostname) == 0  # Only first host creates header
+      when: 
+        - ansible_play_batch | length > 0  # Only run if hosts exist
 
-    - name: 8. Append host health data to CSV
+    - name: 9. Wait for header file to exist (prevent race condition)
+      wait_for:
+        path: "{{ report_file }}"
+        timeout: 10
       delegate_to: localhost
       become: no
-      throttle: 1  # Prevent race conditions when multiple hosts write simultaneously
+
+    - name: 10. Append host health data to CSV
+      delegate_to: localhost
+      become: no
+      throttle: 1  # Serialize writes to avoid corruption
       lineinfile:
         path: "{{ report_file }}"
-        line: "{{ inventory_hostname }},{{ reporting_ip }},{{ full_os_name }},{{ disk_check.stdout | replace(',', ' ') }},{{ cpu_usage }},{{ mem_usage }},{{ service_status | replace(',', ' ') }},{{ lookup('pipe','date --iso-8601=seconds') }}"
+        line: "{{ inventory_hostname }},{{ reporting_ip }},{{ full_os_name }},{{ disk_check.stdout | default('ERROR') | replace(',', ';') | trim }},{{ cpu_usage }},{{ mem_usage }},{{ service_status | replace(',', ';') | trim }},{{ lookup('pipe','date --iso-8601=seconds') }}"
       ignore_errors: yes
 
-    - name: 9. Email final health report
+    - name: 11. Wait for all hosts to finish writing (barrier sync)
+      wait_for:
+        timeout: 5
+      run_once: true
+      delegate_to: localhost
+      become: no
+      when: 
+        - ansible_play_hosts.index(inventory_hostname) == (ansible_play_hosts | length - 1)
+
+    - name: 12. Email final health report (ALWAYS sends, even on partial failures)
       run_once: true
       delegate_to: localhost
       become: no
@@ -99,16 +151,17 @@
         password: "{{ vault_smtp_password }}"
         secure: starttls
         to: "{{ email_recipient }}"
-        subject: "WINDOWS HEALTH CHECK: Daily Report {{ lookup('pipe', 'date +%Y-%m-%d') }}"
+        subject: "✅ WINDOWS HEALTH CHECK: {{ ansible_play_batch | length }} servers checked {{ lookup('pipe', 'date +%Y-%m-%d') }}"
         body: |
-          Daily health check completed for {{ groups['all'] | length }} Windows servers.
+          Daily health check completed at {{ lookup('pipe', 'date') }}.
 
           Summary:
-          • Hosts checked: {{ ansible_play_batch | length }}
-          • Report generated: {{ lookup('pipe', 'date') }}
+          • Total servers: {{ ansible_play_hosts | length }}
+          • Successfully checked: {{ ansible_play_batch | length }}
+          • Report attached: {{ report_file | basename }}
 
-          See attached CSV for detailed metrics (disk, CPU, memory, services).
+          ⚠️ Note: Some services may be MISSING (not installed) on certain server roles.
         attach: "{{ report_file }}"
       when: 
         - report_file is exists
-        - ansible_play_hosts.index(inventory_hostname) == (ansible_play_hosts | length - 1)  # Only last host sends email
+      ignore_errors: yes  # Never fail the entire playbook due to email issues
