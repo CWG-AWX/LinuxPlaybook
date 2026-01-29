@@ -15,7 +15,6 @@
       set_fact:
         patch_status: "No updates needed"
         reboot_status: "No reboot performed"
-        # FIX: Use ansible_host for clean IPv4 reporting
         reporting_ip: "{{ ansible_host | default(inventory_hostname) }}"
         full_os_name: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
 
@@ -27,8 +26,8 @@
               - SecurityUpdates
               - CriticalUpdates
               - UpdateRollups
-              - DefinitionUpdates  # This catches the Defender KB you saw
-              - Updates            # Catches other non-critical but necessary fixes
+              - DefinitionUpdates
+              - Updates           
             state: installed
             reboot: yes
             reboot_timeout: 7200
