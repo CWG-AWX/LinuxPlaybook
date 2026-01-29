@@ -9,6 +9,7 @@ hostvars_prefix: "ntnx_"
 
 include_vms_with_power_state:
   - 'on'
+filters: "len(address_ips) > 0"
 compose:
   ansible_host: address_ips[0]
 keyed_groups:
