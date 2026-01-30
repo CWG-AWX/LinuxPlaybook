@@ -13,13 +13,11 @@
   tasks:
     - name: Run health check on Windows host
       win_shell: |
-        # Disk check
         $disk = "OK"
         $disks = Get-PSDrive -PSProvider FileSystem | Where {$_.Used -gt 0}
         $low = $disks | Where {($_.Free/($_.Used+$_.Free)*100) -lt 10}
         if ($low) { $disk = "CRITICAL: " + (($low | % {"$($_.Name):$([math]::Round($_.Free/($_.Used+$_.Free)*100,1))%"}) -join ", ") }
         
-        # Service check (universal services only)
         $svc = "OK"
         $failed = @()
         foreach ($s in @('Dnscache','LanmanServer','WinRM')) {
@@ -28,56 +26,57 @@
         }
         if ($failed) { $svc = "FAILED: " + ($failed -join ', ') }
         
-        # CPU/Memory
         $cpu = (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 3).CounterSamples.CookedValue | Measure -Average | % Average
         $mem = (Get-CimInstance Win32_OperatingSystem)
         $used = 100 - ($mem.FreePhysicalMemory / $mem.TotalVisibleMemorySize * 100)
         
-        # Output pipe-delimited for simple parsing
         "$disk|$svc|$([math]::Round($cpu,1))|$([math]::Round($used,1))"
       register: hc
       ignore_errors: yes
       changed_when: false
 
-    - name: Parse health results
+    - name: Parse results safely
       set_fact:
         disk_status: "{{ hc.stdout.split('|')[0] | default('ERROR') | trim }}"
         svc_status: "{{ hc.stdout.split('|')[1] | default('ERROR') | trim }}"
         cpu_usage: "{{ hc.stdout.split('|')[2] | default('N/A') | trim }}"
         mem_usage: "{{ hc.stdout.split('|')[3] | default('N/A') | trim }}"
 
-    - name: Create CSV report on controller (ALL IN ONE TASK - avoids race conditions)
+    - name: Generate report AND email on localhost (single atomic block)
       delegate_to: localhost
       run_once: true
       block:
-        - name: Build CSV content in memory
+        - name: Create CSV content
           set_fact:
-            csv_lines:
-              - "Hostname,IP_Address,OS_Version,Disk_Status,Services_Status,CPU_Usage(%),Memory_Usage(%),Timestamp"
-              - "{{ ansible_hostname }},{{ ansible_host | default(inventory_hostname) }},{{ ansible_distribution }},{{ disk_status | replace(',', ';') }},{{ svc_status | replace(',', ';') }},{{ cpu_usage }},{{ mem_usage }},{{ '%Y-%m-%d %H:%M:%S' | strftime }}"
+            csv_content: |
+              Hostname,IP_Address,OS_Version,Disk_Status,Services_Status,CPU_Usage(%),Memory_Usage(%),Timestamp
+              {{ ansible_hostname }},{{ ansible_host }},{{ ansible_distribution }} {{ ansible_distribution_version }},{{ disk_status | replace(',', ';') }},{{ svc_status | replace(',', ';') }},{{ cpu_usage }},{{ mem_usage }},{{ '%Y-%m-%d %H:%M:%S' | strftime }}
 
-        - name: Write complete CSV file atomically
+        - name: Write CSV file
           copy:
-            content: "{{ csv_lines | join('\n') }}\n"
+            content: "{{ csv_content }}"
             dest: "{{ report_file }}"
             mode: '0644'
 
-    - name: Email report (run once after all hosts)
-      community.general.mail:
-        host: "{{ smtp_server }}"
-        port: "{{ smtp_port }}"
-        username: "{{ smtp_user }}"
-        password: "{{ vault_smtp_password }}"
-        secure: starttls
-        to: "{{ email_recipient }}"
-        subject: "✅ Windows Health Report - {{ ansible_date_time.date }}"
-        body: |
-          Daily health check completed successfully.
-
-          Servers checked: {{ ansible_play_batch | length }}
-          Report generated: {{ '%Y-%m-%d %H:%M:%S' | strftime }}
-        attach: "{{ report_file }}"
-      delegate_to: localhost
-      run_once: true
-      when: report_file is exists
-      ignore_errors: yes
+        - name: Send email with report attached
+          community.general.mail:
+            host: "{{ smtp_server }}"
+            port: "{{ smtp_port }}"
+            username: "{{ smtp_user }}"
+            password: "{{ vault_smtp_password }}"
+            secure: starttls
+            to: "{{ email_recipient }}"
+            subject: "✅ Windows Health Report - {{ '%Y-%m-%d' | strftime }}"
+            body: |
+              Daily health check completed for {{ ansible_play_batch | length }} server(s).
+              
+              Host: {{ ansible_hostname }}
+              IP: {{ ansible_host }}
+              Disk: {{ disk_status }}
+              Services: {{ svc_status }}
+              CPU: {{ cpu_usage }}%
+              Memory: {{ mem_usage }}%
+              
+              Full report attached.
+            attach: "{{ report_file }}"
+          ignore_errors: yes  # Never fail the entire playbook due to email issues
