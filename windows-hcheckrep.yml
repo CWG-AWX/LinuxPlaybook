@@ -9,138 +9,116 @@
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
-    # Services that might not exist on all server roles
+    # ONLY universal services that exist on ALL Windows servers
     critical_services:
-      - Dhcp
-      - Dnscache
-      - LanmanServer
-      - WinRM
-      - W3SVC          # Web servers only
-      - MSSQLSERVER    # SQL servers only
+      - Dnscache        # DNS Client
+      - LanmanServer    # Server service (SMB/file sharing)
+      - WinRM           # Remote management
 
   tasks:
     - name: 1. Initialize health metrics
       set_fact:
-        disk_status: "OK"
-        service_status: "OK"
-        cpu_usage: "N/A"
-        mem_usage: "N/A"
         reporting_ip: "{{ ansible_host | default(inventory_hostname) }}"
         full_os_name: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
 
-    - name: 2. Check disk space (all drives)
+    - name: 2. Run comprehensive health check in PowerShell (single call)
       win_shell: |
+        # Disk check
         $disks = Get-PSDrive -PSProvider FileSystem | Where-Object {$_.Used -gt 0} | 
                  Select-Object Name, @{n='FreePct';e={[math]::Round(($_.Free/($_.Used+$_.Free))*100,1)}}
-        $critical = $disks | Where-Object {$_.FreePct -lt 10}
-        if ($critical) {
-          "CRITICAL: " + ($critical | ForEach-Object {"$($_.Name):$($_.FreePct)%"} | Join-String -Separator ", ")
+        $diskCrit = $disks | Where-Object {$_.FreePct -lt 10}
+        if ($diskCrit) {
+          $diskStatus = "CRITICAL: " + ($diskCrit | ForEach-Object {"$($_.Name):$($_.FreePct)%"} | Join-String -Separator ", ")
         } else {
-          "OK"
+          $diskStatus = "OK"
         }
-      register: disk_check
-      changed_when: false
-      ignore_errors: yes
 
-    - name: 3. Check critical services (gracefully handle missing services)
-      win_service:
-        name: "{{ item }}"
-        state: started
-      loop: "{{ critical_services }}"
-      ignore_errors: yes  # Critical: prevents playbook failure on missing services
-      register: service_check
+        # Service check (safe handling of missing services)
+        $services = @{{ '{{ critical_services }}' }}
+        $failed = @()
+        $missing = @()
+        foreach ($svc in $services) {
+          $result = Get-Service -Name $svc -ErrorAction SilentlyContinue
+          if (-not $result) {
+            $missing += $svc
+          } elseif ($result.Status -ne 'Running') {
+            $failed += $svc
+          }
+        }
+        if ($failed.Count -gt 0) {
+          $svcStatus = "FAILED: " + ($failed -join ', ')
+        } elseif ($missing.Count -gt 0) {
+          $svcStatus = "MISSING: " + ($missing -join ', ')
+        } else {
+          $svcStatus = "OK"
+        }
 
-    - name: 4. Evaluate service health (safe attribute access)
-      set_fact:
-        failed_services: >-
-          {{
-            service_check.results
-            | selectattr('status', 'defined')
-            | rejectattr('status', 'equalto', 'running')
-            | map(attribute='name')
-            | list
-          }}
-        missing_services: >-
-          {{
-            service_check.results
-            | rejectattr('status', 'defined')
-            | map(attribute='name')
-            | list
-          }}
-      no_log: true  # Avoid leaking service names in logs
-
-    - name: 5. Format service status string
-      set_fact:
-        service_status: >-
-          {{
-            (failed_services | length > 0) | ternary(
-              'FAILED: ' + failed_services | join(', '),
-              (missing_services | length > 0) | ternary(
-                'MISSING: ' + missing_services | join(', '),
-                'OK'
-              )
-            )
-          }}
-
-    - name: 6. Get CPU/Memory usage
-      win_shell: |
+        # CPU/Memory
         try {
           $cpu = (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 3 -ErrorAction Stop).CounterSamples.CookedValue | Measure-Object -Average | % Average
+          $cpu = [math]::Round($cpu, 1)
         } catch {
           $cpu = "N/A"
         }
         try {
           $mem = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
           $memUsed = 100 - ($mem.FreePhysicalMemory / $mem.TotalVisibleMemorySize * 100)
+          $memUsed = [math]::Round($memUsed, 1)
         } catch {
           $memUsed = "N/A"
         }
-        "$cpu,$memUsed"
-      register: perf_check
+
+        # Output JSON for Ansible to parse
+        @{
+          disk_status = $diskStatus
+          service_status = $svcStatus
+          cpu_usage = $cpu
+          mem_usage = $memUsed
+        } | ConvertTo-Json
+      register: health_check
       changed_when: false
       ignore_errors: yes
 
-    - name: 7. Parse performance metrics safely
+    - name: 3. Parse health check results (safe fallbacks)
       set_fact:
-        cpu_usage: "{{ perf_check.stdout.split(',')[0] | default('N/A') | trim }}"
-        mem_usage: "{{ perf_check.stdout.split(',')[1] | default('N/A') | trim }}"
+        disk_status: "{{ (health_check.stdout | from_json).disk_status | default('ERROR') }}"
+        service_status: "{{ (health_check.stdout | from_json).service_status | default('ERROR') }}"
+        cpu_usage: "{{ (health_check.stdout | from_json).cpu_usage | default('N/A') }}"
+        mem_usage: "{{ (health_check.stdout | from_json).mem_usage | default('N/A') }}"
 
-    - name: 8. Create CSV header (run ONCE on controller before any hosts)
+    - name: 4. Create CSV header (run ONCE on controller)
       run_once: true
       delegate_to: localhost
       become: no
       copy:
         dest: "{{ report_file }}"
         content: "Hostname,IP_Address,OS_Version,Disk_Status,CPU_Usage(%),Memory_Usage(%),Service_Status,Timestamp\n"
-      when: 
-        - ansible_play_batch | length > 0  # Only run if hosts exist
 
-    - name: 9. Wait for header file to exist (prevent race condition)
+    - name: 5. Wait for header file to exist
       wait_for:
         path: "{{ report_file }}"
         timeout: 10
       delegate_to: localhost
       become: no
 
-    - name: 10. Append host health data to CSV
+    - name: 6. Append host health data to CSV
       delegate_to: localhost
       become: no
-      throttle: 1  # Serialize writes to avoid corruption
+      throttle: 1
       lineinfile:
         path: "{{ report_file }}"
-        line: "{{ inventory_hostname }},{{ reporting_ip }},{{ full_os_name }},{{ disk_check.stdout | default('ERROR') | replace(',', ';') | trim }},{{ cpu_usage }},{{ mem_usage }},{{ service_status | replace(',', ';') | trim }},{{ lookup('pipe','date --iso-8601=seconds') }}"
+        line: "{{ inventory_hostname }},{{ reporting_ip }},{{ full_os_name }},{{ disk_status | replace(',', ';') }},{{ cpu_usage }},{{ mem_usage }},{{ service_status | replace(',', ';') }},{{ lookup('pipe','date --iso-8601=seconds') }}"
       ignore_errors: yes
 
-    - name: 11. Wait for all hosts to finish writing (barrier sync)
+    - name: 7. Barrier sync - wait for all hosts to finish writing
       wait_for:
         timeout: 5
       run_once: true
       delegate_to: localhost
       become: no
-      when: 
-        - ansible_play_hosts.index(inventory_hostname) == (ansible_play_hosts | length - 1)
+      when: ansible_play_hosts.index(inventory_hostname) == (ansible_play_hosts | length - 1)
 
-    - name: 12. Email final health report (ALWAYS sends, even on partial failures)
+    - name: 8. Email final health report
       run_once: true
       delegate_to: localhost
       become: no
@@ -159,9 +137,6 @@
           • Total servers: {{ ansible_play_hosts | length }}
           • Successfully checked: {{ ansible_play_batch | length }}
           • Report attached: {{ report_file | basename }}
-
-          ⚠️ Note: Some services may be MISSING (not installed) on certain server roles.
         attach: "{{ report_file }}"
-      when: 
-        - report_file is exists
-      ignore_errors: yes  # Never fail the entire playbook due to email issues
+      when: report_file is exists
+      ignore_errors: yes
