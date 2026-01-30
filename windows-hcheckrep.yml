@@ -11,66 +11,58 @@
     smtp_user: "ignioservices@gmail.com"
 
   tasks:
-    - name: Run health check (disk, services, CPU, memory)
+    - name: Run health check on Windows host
       win_shell: |
-        $output = @{}
-        
         # Disk check
-        $disks = Get-PSDrive -PSProvider FileSystem | Where-Object {$_.Used -gt 0}
-        $lowDisk = $disks | Where-Object {($_.Free/($_.Used+$_.Free)*100) -lt 10}
-        if ($lowDisk) {
-          $output.disk = "CRITICAL: " + ($lowDisk | ForEach-Object {"$($_.Name):$([math]::Round($_.Free/($_.Used+$_.Free)*100,1))%"} -join ", ")
-        } else {
-          $output.disk = "OK"
-        }
+        $disk = "OK"
+        $disks = Get-PSDrive -PSProvider FileSystem | Where {$_.Used -gt 0}
+        $low = $disks | Where {($_.Free/($_.Used+$_.Free)*100) -lt 10}
+        if ($low) { $disk = "CRITICAL: " + (($low | % {"$($_.Name):$([math]::Round($_.Free/($_.Used+$_.Free)*100,1))%"}) -join ", ") }
         
-        # Service check (only universal services)
-        $failedServices = @()
-        foreach ($svc in @('Dnscache','LanmanServer','WinRM')) {
-          $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
-          if ($s -and $s.Status -ne 'Running') { $failedServices += $svc }
+        # Service check (universal services only)
+        $svc = "OK"
+        $failed = @()
+        foreach ($s in @('Dnscache','LanmanServer','WinRM')) {
+          $x = Get-Service $s -EA 0
+          if ($x -and $x.Status -ne 'Running') { $failed += $s }
         }
-        $output.services = if ($failedServices) { "FAILED: " + ($failedServices -join ', ') } else { "OK" }
+        if ($failed) { $svc = "FAILED: " + ($failed -join ', ') }
         
         # CPU/Memory
-        $cpu = (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 3).CounterSamples.CookedValue | Measure-Object -Average | % Average
-        $mem = Get-CimInstance Win32_OperatingSystem
-        $memUsed = 100 - ($mem.FreePhysicalMemory / $mem.TotalVisibleMemorySize * 100)
+        $cpu = (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 3).CounterSamples.CookedValue | Measure -Average | % Average
+        $mem = (Get-CimInstance Win32_OperatingSystem)
+        $used = 100 - ($mem.FreePhysicalMemory / $mem.TotalVisibleMemorySize * 100)
         
-        $output.cpu = [math]::Round($cpu, 1)
-        $output.mem = [math]::Round($memUsed, 1)
-        $output.hostname = $env:COMPUTERNAME
-        $output.ip = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias '*' | Select-Object -First 1).IPAddress
-        
-        $output | ConvertTo-Json
-      register: health
+        # Output pipe-delimited for simple parsing
+        "$disk|$svc|$([math]::Round($cpu,1))|$([math]::Round($used,1))"
+      register: hc
       ignore_errors: yes
       changed_when: false
 
-    - name: Set safe defaults if health check failed
+    - name: Parse health results
       set_fact:
-        disk_status: "{{ (health.stdout | from_json | default({})).disk | default('CHECK FAILED') }}"
-        svc_status: "{{ (health.stdout | from_json | default({})).services | default('CHECK FAILED') }}"
-        cpu_usage: "{{ (health.stdout | from_json | default({})).cpu | default('N/A') }}"
-        mem_usage: "{{ (health.stdout | from_json | default({})).mem | default('N/A') }}"
-        host_ip: "{{ (health.stdout | from_json | default({})).ip | default(ansible_host | default(inventory_hostname)) }}"
+        disk_status: "{{ hc.stdout.split('|')[0] | default('ERROR') | trim }}"
+        svc_status: "{{ hc.stdout.split('|')[1] | default('ERROR') | trim }}"
+        cpu_usage: "{{ hc.stdout.split('|')[2] | default('N/A') | trim }}"
+        mem_usage: "{{ hc.stdout.split('|')[3] | default('N/A') | trim }}"
 
-    - name: Create CSV header (once)
-      copy:
-        content: "Hostname,IP_Address,OS,Disk_Status,CPU_Usage,Memory_Usage,Services_Status,Time\n"
-        dest: "{{ report_file }}"
+    - name: Create CSV report on controller (ALL IN ONE TASK - avoids race conditions)
       delegate_to: localhost
       run_once: true
-      when: ansible_play_hosts.index(inventory_hostname) == 0
+      block:
+        - name: Build CSV content in memory
+          set_fact:
+            csv_lines:
+              - "Hostname,IP_Address,OS_Version,Disk_Status,Services_Status,CPU_Usage(%),Memory_Usage(%),Timestamp"
+              - "{{ ansible_hostname }},{{ ansible_host | default(inventory_hostname) }},{{ ansible_distribution }},{{ disk_status | replace(',', ';') }},{{ svc_status | replace(',', ';') }},{{ cpu_usage }},{{ mem_usage }},{{ '%Y-%m-%d %H:%M:%S' | strftime }}"
 
-    - name: Append host data to CSV
-      lineinfile:
-        path: "{{ report_file }}"
-        line: "{{ ansible_hostname }},{{ host_ip }},{{ ansible_distribution }},{{ disk_status | replace(',', ';') }},{{ cpu_usage }},{{ mem_usage }},{{ svc_status | replace(',', ';') }},{{ '%Y-%m-%d %H:%M:%S' | strftime }}"
-      delegate_to: localhost
-      throttle: 1
+        - name: Write complete CSV file atomically
+          copy:
+            content: "{{ csv_lines | join('\n') }}\n"
+            dest: "{{ report_file }}"
+            mode: '0644'
 
-    - name: Send email report (once after all hosts)
+    - name: Email report (run once after all hosts)
       community.general.mail:
         host: "{{ smtp_server }}"
         port: "{{ smtp_port }}"
@@ -78,12 +70,14 @@
         password: "{{ vault_smtp_password }}"
         secure: starttls
         to: "{{ email_recipient }}"
-        subject: "Windows Health Report - {{ ansible_date_time.date }}"
-        body: "Daily health check completed for {{ ansible_play_batch | length }} server(s). See attached CSV."
+        subject: "✅ Windows Health Report - {{ ansible_date_time.date }}"
+        body: |
+          Daily health check completed successfully.
+
+          Servers checked: {{ ansible_play_batch | length }}
+          Report generated: {{ '%Y-%m-%d %H:%M:%S' | strftime }}
         attach: "{{ report_file }}"
       delegate_to: localhost
       run_once: true
-      when: 
-        - ansible_play_hosts.index(inventory_hostname) == (ansible_play_hosts | length - 1)
-        - report_file is exists
+      when: report_file is exists
       ignore_errors: yes
