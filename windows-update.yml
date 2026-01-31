@@ -75,6 +75,6 @@
         secure: starttls
         to: "{{ email_recipient }}"
         subject: "PROD WINDOWS AUDIT: Patching Report Complete"
-        body: "Windows patching cycle is complete. The report now includes Definition Updates and IPv4 corrections."
+        body: "Hi Team, Kindly note that Windows patching cycle is complete. See attached csv file for patch report."
         attach: "{{ report_file }}"
       when: report_file is exists
