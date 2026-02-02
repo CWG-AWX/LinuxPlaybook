@@ -4,8 +4,8 @@
   gather_facts: yes
 
   vars:
-    report_file: "/tmp/health_{{ '%Y%m%d_%H%M%S' | strftime }}.csv"
-    email_recipient: "abdullateef.adekogbe@cwg-plc.com"
+    # SMTP settings
+    email_recipient: "michael.obateru@cwg-plc.com"
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
@@ -42,9 +42,18 @@
         cpu_usage: "{{ hc.stdout.split('|')[2] | default('N/A') | trim }}"
         mem_usage: "{{ hc.stdout.split('|')[3] | default('N/A') | trim }}"
 
-    - name: Generate report AND email on localhost (single atomic block)
+    - name: Generate timestamp ONCE on localhost (critical fix)
       delegate_to: localhost
       run_once: true
+      set_fact:
+        report_timestamp: "{{ '%Y%m%d_%H%M%S' | strftime }}"
+      when: hostvars[inventory_hostname].report_timestamp is not defined
+
+    - name: Build and email report from localhost (atomic operation)
+      delegate_to: localhost
+      run_once: true
+      vars:
+        report_file: "/tmp/health_{{ hostvars[inventory_hostname].report_timestamp }}.csv"
       block:
         - name: Create CSV content
           set_fact:
@@ -66,7 +75,7 @@
             password: "{{ vault_smtp_password }}"
             secure: starttls
             to: "{{ email_recipient }}"
-            subject: "✅ Windows Health Report - {{ '%Y-%m-%d' | strftime }}"
+            subject: "✅ Windows Health Report - {{ hostvars[inventory_hostname].report_timestamp }}"
             body: |
               Daily health check completed for {{ ansible_play_batch | length }} server(s).
               
@@ -79,4 +88,4 @@
               
               Full report attached.
             attach: "{{ report_file }}"
-          ignore_errors: yes  # Never fail the entire playbook due to email issues
+          ignore_errors: yes
