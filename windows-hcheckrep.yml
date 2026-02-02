@@ -58,7 +58,7 @@
         - name: Create CSV content
           set_fact:
             csv_content: |
-              Hostname,IP_Address,OS_Version,Disk_Status,Services_Status,CPU_Usage(%),Memory_Usage(%),Timestamp
+              Inventory_Hostname,Windows_Hostname,IP_Address,OS_Version,Disk_Status,Services_Status,CPU_Usage(%),Memory_Usage(%),Timestamp
               {{ ansible_hostname }},{{ ansible_host }},{{ ansible_distribution }} {{ ansible_distribution_version }},{{ disk_status | replace(',', ';') }},{{ svc_status | replace(',', ';') }},{{ cpu_usage }},{{ mem_usage }},{{ '%Y-%m-%d %H:%M:%S' | strftime }}
 
         - name: Write CSV file
@@ -79,7 +79,7 @@
             body: |
               Daily health check completed for {{ ansible_play_batch | length }} server(s).
               
-              Host: {{ ansible_hostname }}
+              Host: {{ Inventory_hostname }}
               IP: {{ ansible_host }}
               Disk: {{ disk_status }}
               Services: {{ svc_status }}
