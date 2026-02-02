@@ -5,7 +5,7 @@
 
   vars:
     # SMTP settings
-    email_recipient: "michael.obateru@cwg-plc.com"
+    email_recipient: "abdullateef.adekogbe@cwg-plc.com"
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
