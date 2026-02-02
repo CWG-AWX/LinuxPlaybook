@@ -4,7 +4,6 @@
   gather_facts: yes
 
   vars:
-    # SMTP settings
     email_recipient: "abdullateef.adekogbe@cwg-plc.com"
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
@@ -42,32 +41,24 @@
         cpu_usage: "{{ hc.stdout.split('|')[2] | default('N/A') | trim }}"
         mem_usage: "{{ hc.stdout.split('|')[3] | default('N/A') | trim }}"
 
-    - name: Generate timestamp ONCE on localhost (critical fix)
-      delegate_to: localhost
-      run_once: true
-      set_fact:
-        report_timestamp: "{{ '%Y%m%d_%H%M%S' | strftime }}"
-      when: hostvars[inventory_hostname].report_timestamp is not defined
-
-    - name: Build and email report from localhost (atomic operation)
+    - name: Generate report and email on localhost (atomic)
       delegate_to: localhost
       run_once: true
       vars:
-        report_file: "/tmp/health_{{ hostvars[inventory_hostname].report_timestamp }}.csv"
+        # CRITICAL: Use inventory_hostname (your AWX name) NOT ansible_hostname (Windows name)
+        inventory_host: "{{ inventory_hostname }}"
+        windows_host: "{{ ansible_hostname }}"
+        report_file: "/tmp/health_{{ '%Y%m%d_%H%M%S' | strftime }}.csv"
       block:
-        - name: Create CSV content
-          set_fact:
-            csv_content: |
-              Inventory_Hostname,Windows_Hostname,IP_Address,OS_Version,Disk_Status,Services_Status,CPU_Usage(%),Memory_Usage(%),Timestamp
-              {{ ansible_hostname }},{{ ansible_host }},{{ ansible_distribution }} {{ ansible_distribution_version }},{{ disk_status | replace(',', ';') }},{{ svc_status | replace(',', ';') }},{{ cpu_usage }},{{ mem_usage }},{{ '%Y-%m-%d %H:%M:%S' | strftime }}
-
-        - name: Write CSV file
+        - name: Create CSV with INVENTORY hostname
           copy:
-            content: "{{ csv_content }}"
+            content: |
+              Inventory_Hostname,Windows_Hostname,IP_Address,OS_Version,Disk_Status,Services_Status,CPU_Usage(%),Memory_Usage(%),Timestamp
+              {{ inventory_host }},{{ windows_host }},{{ ansible_host }},{{ ansible_distribution }} {{ ansible_distribution_version }},{{ disk_status | replace(',', ';') }},{{ svc_status | replace(',', ';') }},{{ cpu_usage }},{{ mem_usage }},{{ '%Y-%m-%d %H:%M:%S' | strftime }}
             dest: "{{ report_file }}"
             mode: '0644'
 
-        - name: Send email with report attached
+        - name: Send email with report
           community.general.mail:
             host: "{{ smtp_server }}"
             port: "{{ smtp_port }}"
@@ -75,12 +66,11 @@
             password: "{{ vault_smtp_password }}"
             secure: starttls
             to: "{{ email_recipient }}"
-            subject: "✅ Windows Health Report - {{ hostvars[inventory_hostname].report_timestamp }}"
+            subject: "✅ Health Report - {{ inventory_host }} ({{ '%Y-%m-%d' | strftime }})"
             body: |
-              Daily health check completed for {{ ansible_play_batch | length }} server(s).
+              Health check completed for inventory host: {{ inventory_host }}
+              Actual Windows hostname: {{ windows_host }}
               
-              Host: {{ Inventory_hostname }}
-              IP: {{ ansible_host }}
               Disk: {{ disk_status }}
               Services: {{ svc_status }}
               CPU: {{ cpu_usage }}%
