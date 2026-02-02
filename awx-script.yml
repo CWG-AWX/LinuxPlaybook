@@ -39,3 +39,4 @@
       service:
         name: ssh
         state: restarted
+        ignore errors: yes
