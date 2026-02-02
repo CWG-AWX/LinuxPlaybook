@@ -55,11 +55,11 @@
       vars:
         report_file: "/tmp/health_{{ hostvars[inventory_hostname].report_timestamp }}.csv"
       block:
-        - name: Create CSV content
+        - name: Create CSV content (USES INVENTORY HOSTNAME)
           set_fact:
             csv_content: |
-              Inventory_hostname,IP_Address,OS_Version,Disk_Status,Services_Status,CPU_Usage(%),Memory_Usage(%),Timestamp
-              {{ ansible_hostname }},{{ ansible_host }},{{ ansible_distribution }} {{ ansible_distribution_version }},{{ disk_status | replace(',', ';') }},{{ svc_status | replace(',', ';') }},{{ cpu_usage }},{{ mem_usage }},{{ '%Y-%m-%d %H:%M:%S' | strftime }}
+              Inventory_Hostname,IP_Address,OS_Version,Disk_Status,Services_Status,CPU_Usage(%),Memory_Usage(%),Timestamp
+              {{ inventory_hostname }},{{ ansible_host }},{{ ansible_distribution }} {{ ansible_distribution_version }},{{ disk_status | replace(',', ';') }},{{ svc_status | replace(',', ';') }},{{ cpu_usage }},{{ mem_usage }},{{ '%Y-%m-%d %H:%M:%S' | strftime }}
 
         - name: Write CSV file
           copy:
@@ -67,7 +67,7 @@
             dest: "{{ report_file }}"
             mode: '0644'
 
-        - name: Send email with report attached
+        - name: Send email with report attached (USES INVENTORY HOSTNAME)
           community.general.mail:
             host: "{{ smtp_server }}"
             port: "{{ smtp_port }}"
@@ -75,11 +75,10 @@
             password: "{{ vault_smtp_password }}"
             secure: starttls
             to: "{{ email_recipient }}"
-            subject: "✅ Windows Health Report - {{ hostvars[inventory_hostname].report_timestamp }}"
+            subject: "✅ Health Report - {{ inventory_hostname }} ({{ '%Y-%m-%d' | strftime }})"
             body: |
-              Daily health check completed for {{ ansible_play_batch | length }} server(s).
+              Health check completed for inventory host: {{ inventory_hostname }}
               
-              Host: {{ ansible_hostname }}
               IP: {{ ansible_host }}
               Disk: {{ disk_status }}
               Services: {{ svc_status }}
