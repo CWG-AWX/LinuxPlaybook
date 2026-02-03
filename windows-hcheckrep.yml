@@ -11,36 +11,70 @@
     smtp_user: "ignioservices@gmail.com"
 
   tasks:
-    - name: Run health check on Windows host
+    - name: Run comprehensive health check on Windows host
       win_shell: |
-        $disk = "OK"
-        $disks = Get-PSDrive -PSProvider FileSystem | Where {$_.Used -gt 0}
-        $low = $disks | Where {($_.Free/($_.Used+$_.Free)*100) -lt 10}
-        if ($low) { $disk = "CRITICAL: " + (($low | % {"$($_.Name):$([math]::Round($_.Free/($_.Used+$_.Free)*100,1))%"}) -join ", ") }
+        # Uptime in days
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+        $uptime = (Get-Date) - $os.LastBootUpTime
+        $uptime_days = [math]::Floor($uptime.TotalDays)
         
-        $svc = "OK"
-        $failed = @()
-        foreach ($s in @('Dnscache','LanmanServer','WinRM')) {
-          $x = Get-Service $s -EA 0
-          if ($x -and $x.Status -ne 'Running') { $failed += $s }
+        # CPU usage
+        $cpu = (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 3 -ErrorAction SilentlyContinue).CounterSamples.CookedValue | Measure-Object -Average | % Average
+        $cpu_pct = [math]::Round($cpu, 1)
+        
+        # Memory free in GB
+        $mem_free_gb = [math]::Round($os.FreePhysicalMemory / 1024 / 1024, 2)
+        
+        # Disk C: and D: free space %
+        $disk_c = Get-PSDrive C -ErrorAction SilentlyContinue
+        $disk_c_free = if ($disk_c) { [math]::Round($disk_c.Free / ($disk_c.Free + $disk_c.Used) * 100, 1) } else { "N/A" }
+        $disk_d = Get-PSDrive D -ErrorAction SilentlyContinue
+        $disk_d_free = if ($disk_d) { [math]::Round($disk_d.Free / ($disk_d.Free + $disk_d.Used) * 100, 1) } else { "N/A" }
+        
+        # Stopped critical services
+        $critical_services = @('Dnscache','LanmanServer','WinRM')
+        $stopped = @()
+        foreach ($s in $critical_services) {
+          $svc = Get-Service $s -ErrorAction SilentlyContinue
+          if ($svc -and $svc.Status -ne 'Running') { $stopped += $s }
         }
-        if ($failed) { $svc = "FAILED: " + ($failed -join ', ') }
+        $stopped_services = if ($stopped.Count -gt 0) { $stopped -join ',' } else { "None" }
         
-        $cpu = (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 3).CounterSamples.CookedValue | Measure -Average | % Average
-        $mem = (Get-CimInstance Win32_OperatingSystem)
-        $used = 100 - ($mem.FreePhysicalMemory / $mem.TotalVisibleMemorySize * 100)
+        # System/Application errors (last 24h)
+        $sys_errors = (Get-WinEvent -FilterHashtable @{LogName='System'; Level=2; StartTime=(Get-Date).AddHours(-24)} -ErrorAction SilentlyContinue | Measure-Object).Count
+        $app_errors = (Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2; StartTime=(Get-Date).AddHours(-24)} -ErrorAction SilentlyContinue | Measure-Object).Count
         
-        "$disk|$svc|$([math]::Round($cpu,1))|$([math]::Round($used,1))"
+        # Last patch date
+        $last_patch = Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 1 -ErrorAction SilentlyContinue
+        $last_patch_date = if ($last_patch) { $last_patch.InstalledOn.ToString('yyyy-MM-dd') } else { "Never" }
+        
+        # Backup status (Windows Server Backup)
+        $backup_status = "No Backup Configured"
+        if (Get-Command Get-WBJob -ErrorAction SilentlyContinue) {
+          $backup = Get-WBJob -Previous 1 -ErrorAction SilentlyContinue
+          if ($backup -and $backup.EndTime -gt (Get-Date).AddHours(-24)) {
+            $backup_status = if ($backup.JobState -eq 'Completed') { "Success" } else { "Failed: $($backup.JobState)" }
+          }
+        }
+        
+        # Output all 10 metrics pipe-delimited
+        "$uptime_days|$cpu_pct|$mem_free_gb|$disk_c_free|$disk_d_free|$stopped_services|$sys_errors|$app_errors|$last_patch_date|$backup_status"
       register: hc
       ignore_errors: yes
       changed_when: false
 
-    - name: Parse results safely
+    - name: Parse comprehensive results safely
       set_fact:
-        disk_status: "{{ hc.stdout.split('|')[0] | default('ERROR') | trim }}"
-        svc_status: "{{ hc.stdout.split('|')[1] | default('ERROR') | trim }}"
-        cpu_usage: "{{ hc.stdout.split('|')[2] | default('N/A') | trim }}"
-        mem_usage: "{{ hc.stdout.split('|')[3] | default('N/A') | trim }}"
+        uptime_days: "{{ hc.stdout.split('|')[0] | default('N/A') | trim }}"
+        cpu_pct: "{{ hc.stdout.split('|')[1] | default('N/A') | trim }}"
+        mem_free_gb: "{{ hc.stdout.split('|')[2] | default('N/A') | trim }}"
+        disk_c_free: "{{ hc.stdout.split('|')[3] | default('N/A') | trim }}"
+        disk_d_free: "{{ hc.stdout.split('|')[4] | default('N/A') | trim }}"
+        stopped_services: "{{ hc.stdout.split('|')[5] | default('N/A') | trim }}"
+        sys_errors: "{{ hc.stdout.split('|')[6] | default('0') | trim }}"
+        app_errors: "{{ hc.stdout.split('|')[7] | default('0') | trim }}"
+        last_patch_date: "{{ hc.stdout.split('|')[8] | default('Never') | trim }}"
+        backup_status: "{{ hc.stdout.split('|')[9] | default('Unknown') | trim }}"
 
     - name: Generate timestamp ONCE on localhost (critical fix)
       delegate_to: localhost
@@ -55,11 +89,11 @@
       vars:
         report_file: "/tmp/health_{{ hostvars[inventory_hostname].report_timestamp }}.csv"
       block:
-        - name: Create CSV content (USES INVENTORY HOSTNAME)
+        - name: Create CSV content with EXACT requested columns
           set_fact:
             csv_content: |
-              Inventory_Hostname,IP_Address,OS_Version,Disk_Status,Services_Status,CPU_Usage(%),Memory_Usage(%),Timestamp
-              {{ inventory_hostname }},{{ ansible_host }},{{ ansible_distribution }} {{ ansible_distribution_version }},{{ disk_status | replace(',', ';') }},{{ svc_status | replace(',', ';') }},{{ cpu_usage }},{{ mem_usage }},{{ '%Y-%m-%d %H:%M:%S' | strftime }}
+              Hostname,IP,UptimeDays,CPU%,MemFreeGB,DiskC_Free%,DiskD_Free%,StoppedServices,SystemErrors24h,AppErrors24h,LastPatchDate,BackupStatus
+              {{ inventory_hostname }},{{ ansible_host }},{{ uptime_days }},{{ cpu_pct }},{{ mem_free_gb }},{{ disk_c_free }},{{ disk_d_free }},{{ stopped_services }},{{ sys_errors }},{{ app_errors }},{{ last_patch_date }},{{ backup_status }}
 
         - name: Write CSV file
           copy:
@@ -77,14 +111,20 @@
             to: "{{ email_recipient }}"
             subject: "✅ Health Report - {{ inventory_hostname }} ({{ '%Y-%m-%d' | strftime }})"
             body: |
-              Health check completed for inventory host: {{ inventory_hostname }}
-              
+              Health check completed for: {{ inventory_hostname }}
               IP: {{ ansible_host }}
-              Disk: {{ disk_status }}
-              Services: {{ svc_status }}
-              CPU: {{ cpu_usage }}%
-              Memory: {{ mem_usage }}%
               
-              Full report attached.
+              Uptime: {{ uptime_days }} days
+              CPU: {{ cpu_pct }}%
+              Memory Free: {{ mem_free_gb }} GB
+              Disk C: {{ disk_c_free }}% free
+              Disk D: {{ disk_d_free }}% free
+              Stopped Services: {{ stopped_services }}
+              System Errors (24h): {{ sys_errors }}
+              Application Errors (24h): {{ app_errors }}
+              Last Patch: {{ last_patch_date }}
+              Backup Status: {{ backup_status }}
+              
+              Full report with all metrics attached.
             attach: "{{ report_file }}"
           ignore_errors: yes
