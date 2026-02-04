@@ -1,5 +1,5 @@
 ---
-- name: Offline Install Checkmk Agent - Ubuntu
+- name: Deploy Checkmk plugins for user password expiration and logins
   hosts: all
   become: yes
 
