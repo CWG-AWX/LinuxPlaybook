@@ -1,0 +1,91 @@
+---
+- name: Configure Checkmk Agent - Firewall and Plugins
+  hosts: all
+  become: yes
+  vars:
+    plugin_dir: "/usr/lib/check_mk_agent/plugins"
+
+  tasks:
+    # --- SECTION 1: FIREWALL CONFIGURATION ---
+    - name: Check if UFW is installed
+      command: which ufw
+      register: ufw_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Open port 6556 in UFW
+      ufw:
+        rule: allow
+        port: '6556'
+        proto: tcp
+      when: ufw_check.rc == 0
+
+    - name: Open port 6556 in IPTables
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: '6556'
+        jump: ACCEPT
+        comment: "Allow Checkmk Agent"
+      when: ufw_check.rc != 0
+
+    # --- SECTION 2: PLUGIN DEPLOYMENT ---
+    - name: Ensure Checkmk plugin directory exists
+      file:
+        path: "{{ plugin_dir }}"
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create mk-logins plugin
+      copy:
+        dest: "{{ plugin_dir }}/mk-logins"
+        mode: '0755'
+        owner: root
+        group: root
+        content: |
+          #!/bin/bash
+          :
+          CMK_VERSION="2.4.0p20"
+          if type who >/dev/null; then
+              echo "<<<logins>>>"
+              who | wc -l
+          fi
+
+    - name: Create mk-passwd plugin
+      copy:
+        dest: "{{ plugin_dir }}/mk-passwd"
+        mode: '0755'
+        owner: root
+        group: root
+        content: |
+          #!/bin/bash
+          echo "<<<local:sep(0)>>>"
+          while IFS=: read -r user _ uid _ _ _ _; do
+              [[ "$uid" -lt 1000 ]] && continue
+              expire=$(chage -l "$user" 2>/dev/null | awk -F": " '/Password expires/ {print $2}')
+              [[ -z "$expire" || "$expire" == "never" ]] && continue
+              days_left=$(( ( $(date -d "$expire" +%s) - $(date +%s) ) / 86400 ))
+              if [ "$days_left" -le 1 ]; then
+                  state=2
+              elif [ "$days_left" -le 3 ]; then
+                  state=1
+              else
+                  state=0
+              fi
+              echo "$state passwd_$user days_left=$days_left Password for user $user expires in $days_left day(s)"
+          done < /etc/passwd
+
+    # --- SECTION 3: VERIFICATION ---
+    - name: Verify port is listening locally
+      shell: "netstat -tuln | grep :6556"
+      register: port_status
+      failed_when: false
+      changed_when: false
+
+    - name: Final Confirmation
+      debug:
+        msg: 
+          - "Plugins deployed to {{ plugin_dir }}"
+          - "Port 6556 status: {{ 'OPEN' if ':6556' in port_status.stdout else 'CHECK_AGENT_SERVICE' }}"
