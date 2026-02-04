@@ -2,7 +2,7 @@
 - name: Windows Daily Health Check (Scalable to 1000+ Hosts)
   hosts: all
   gather_facts: yes
-  strategy: free  # CRITICAL: Run ALL hosts in parallel (not sequentially)
+  strategy: free
 
   vars:
     email_recipient: "abdullateef.adekogbe@cwg-plc.com"
@@ -12,7 +12,7 @@
     report_file: "/tmp/health_{{ '%Y%m%d_%H%M%S' | strftime }}.csv"
 
   tasks:
-    - name: Run health check on Windows host (parallel execution)
+    - name: Run comprehensive health check on Windows host
       win_shell: |
         $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
         $uptime = (Get-Date) - $os.LastBootUpTime
@@ -57,7 +57,7 @@
 
     - name: Parse and store host health data
       set_fact:
-        health_
+        health_data:
           uptime_days: "{{ hc.stdout.split('|')[0] | default('N/A') | trim }}"
           cpu_pct: "{{ hc.stdout.split('|')[1] | default('N/A') | trim }}"
           mem_free_gb: "{{ hc.stdout.split('|')[2] | default('N/A') | trim }}"
@@ -72,9 +72,9 @@
     - name: Generate consolidated CSV report (runs ONCE after ALL hosts finish)
       delegate_to: localhost
       run_once: true
-      when: inventory_hostname == ansible_play_hosts[-1]  # Only LAST host triggers this
+      when: inventory_hostname == ansible_play_hosts[-1]
       block:
-        - name: Build CSV with ALL hosts using hostvars (memory efficient)
+        - name: Build CSV with ALL hosts using hostvars
           copy:
             content: |
               Hostname,IP,UptimeDays,CPU%,MemFreeGB,DiskC_Free%,DiskD_Free%,StoppedServices,SystemErrors24h,AppErrors24h,LastPatchDate,BackupStatus
@@ -96,16 +96,6 @@
             body: |
               Daily health check completed for {{ ansible_play_hosts | length }} Windows servers.
               
-              Top 5 servers with issues:
-              {% set issues = ansible_play_hosts | select('match', '.*') | map('extract', hostvars) | selectattr('health_data.stopped_services', 'ne', 'None') | list %}
-              {% if issues | length > 0 %}
-              {% for host in issues[:5] %}
-              • {{ host.inventory_hostname }}: {{ host.health_data.stopped_services }}
-              {% endfor %}
-              {% else %}
-              ✅ All servers healthy!
-              {% endif %}
-              
-              Full report with all {{ ansible_play_hosts | length }} servers attached.
+              Full report with all metrics attached.
             attach: "{{ report_file }}"
           ignore_errors: yes
