@@ -1,44 +1,58 @@
 ---
 - name: Deploy CheckMK Agent to Target Hosts
-  hosts: all  
-  become: true  
+  hosts: all
+  become: true
   vars:
-    agent_source: "check-mk-agent_2.4.0p20-1_all.deb"  
+    agent_url: "http://192.168.122.140/awx-artifacts/check-mk-agent_2.4.0p20-1_all.deb"
     agent_dest: "/tmp/check-mk-agent_2.4.0p20-1_all.deb"
 
   tasks:
-    - name: Copy CheckMK agent to target host
-      copy:
-        src: "{{ agent_source }}"
+    - name: Ensure curl is available for download (Debian/Ubuntu)
+      apt:
+        name: curl
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+      tags: prep
+
+    - name: Download CheckMK agent from AWX controller
+      get_url:
+        url: "{{ agent_url }}"
         dest: "{{ agent_dest }}"
         mode: '0644'
-        owner: root
-        group: root
-      register: copy_result
-      changed_when: copy_result.changed
+        timeout: 60
+      register: download_result
+      until: download_result is succeeded
+      retries: 3
+      delay: 5
+      tags: download
 
     - name: Install CheckMK agent package
       apt:
         deb: "{{ agent_dest }}"
         state: present
-        force: yes  
       register: install_result
+      ignore_errors: yes
+      tags: install
 
     - name: Fix broken dependencies (if needed)
       apt:
         fix_broken: yes
         state: present
       when: install_result.failed | default(false)
-      ignore_errors: yes  
+      tags: fix_deps
 
     - name: Verify agent installation
       command: dpkg-query -W -f='${Status}' check-mk-agent
       register: verify_install
       changed_when: false
       failed_when: "'install ok installed' not in verify_install.stdout"
+      when: not install_result.failed | default(false)
+      tags: verify
 
     - name: Cleanup installer file
       file:
         path: "{{ agent_dest }}"
         state: absent
-      when: install_result is succeeded
+      when: not install_result.failed | default(false)
+      tags: cleanup
