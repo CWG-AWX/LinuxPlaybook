@@ -1,37 +1,33 @@
 ---
-- name: Windows Daily Health Check
+- name: Windows Daily Health Check (Scalable to 1000+ Hosts)
   hosts: all
   gather_facts: yes
+  strategy: free  # CRITICAL: Run ALL hosts in parallel (not sequentially)
 
   vars:
-    # SMTP settings
     email_recipient: "abdullateef.adekogbe@cwg-plc.com"
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
+    report_file: "/tmp/health_{{ '%Y%m%d_%H%M%S' | strftime }}.csv"
 
   tasks:
-    - name: Run comprehensive health check on Windows host
+    - name: Run health check on Windows host (parallel execution)
       win_shell: |
-        # Uptime in days
         $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
         $uptime = (Get-Date) - $os.LastBootUpTime
         $uptime_days = [math]::Floor($uptime.TotalDays)
         
-        # CPU usage
         $cpu = (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 3 -ErrorAction SilentlyContinue).CounterSamples.CookedValue | Measure-Object -Average | % Average
         $cpu_pct = [math]::Round($cpu, 1)
         
-        # Memory free in GB
         $mem_free_gb = [math]::Round($os.FreePhysicalMemory / 1024 / 1024, 2)
         
-        # Disk C: and D: free space %
         $disk_c = Get-PSDrive C -ErrorAction SilentlyContinue
         $disk_c_free = if ($disk_c) { [math]::Round($disk_c.Free / ($disk_c.Free + $disk_c.Used) * 100, 1) } else { "N/A" }
         $disk_d = Get-PSDrive D -ErrorAction SilentlyContinue
         $disk_d_free = if ($disk_d) { [math]::Round($disk_d.Free / ($disk_d.Free + $disk_d.Used) * 100, 1) } else { "N/A" }
         
-        # Stopped critical services
         $critical_services = @('Dnscache','LanmanServer','WinRM')
         $stopped = @()
         foreach ($s in $critical_services) {
@@ -40,68 +36,55 @@
         }
         $stopped_services = if ($stopped.Count -gt 0) { $stopped -join ',' } else { "None" }
         
-        # System/Application errors (last 24h)
         $sys_errors = (Get-WinEvent -FilterHashtable @{LogName='System'; Level=2; StartTime=(Get-Date).AddHours(-24)} -ErrorAction SilentlyContinue | Measure-Object).Count
         $app_errors = (Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2; StartTime=(Get-Date).AddHours(-24)} -ErrorAction SilentlyContinue | Measure-Object).Count
         
-        # Last patch date
         $last_patch = Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 1 -ErrorAction SilentlyContinue
         $last_patch_date = if ($last_patch) { $last_patch.InstalledOn.ToString('yyyy-MM-dd') } else { "Never" }
         
-        # Backup status (Windows Server Backup)
         $backup_status = "No Backup Configured"
         if (Get-Command Get-WBJob -ErrorAction SilentlyContinue) {
           $backup = Get-WBJob -Previous 1 -ErrorAction SilentlyContinue
           if ($backup -and $backup.EndTime -gt (Get-Date).AddHours(-24)) {
-            $backup_status = if ($backup.JobState -eq 'Completed') { "Success" } else { "Failed: $($backup.JobState)" }
+            $backup_status = if ($backup.JobState -eq 'Completed') { "Success" } else { "Failed" }
           }
         }
         
-        # Output all 10 metrics pipe-delimited
         "$uptime_days|$cpu_pct|$mem_free_gb|$disk_c_free|$disk_d_free|$stopped_services|$sys_errors|$app_errors|$last_patch_date|$backup_status"
       register: hc
       ignore_errors: yes
       changed_when: false
 
-    - name: Parse comprehensive results safely
+    - name: Parse and store host health data
       set_fact:
-        uptime_days: "{{ hc.stdout.split('|')[0] | default('N/A') | trim }}"
-        cpu_pct: "{{ hc.stdout.split('|')[1] | default('N/A') | trim }}"
-        mem_free_gb: "{{ hc.stdout.split('|')[2] | default('N/A') | trim }}"
-        disk_c_free: "{{ hc.stdout.split('|')[3] | default('N/A') | trim }}"
-        disk_d_free: "{{ hc.stdout.split('|')[4] | default('N/A') | trim }}"
-        stopped_services: "{{ hc.stdout.split('|')[5] | default('N/A') | trim }}"
-        sys_errors: "{{ hc.stdout.split('|')[6] | default('0') | trim }}"
-        app_errors: "{{ hc.stdout.split('|')[7] | default('0') | trim }}"
-        last_patch_date: "{{ hc.stdout.split('|')[8] | default('Never') | trim }}"
-        backup_status: "{{ hc.stdout.split('|')[9] | default('Unknown') | trim }}"
+        health_
+          uptime_days: "{{ hc.stdout.split('|')[0] | default('N/A') | trim }}"
+          cpu_pct: "{{ hc.stdout.split('|')[1] | default('N/A') | trim }}"
+          mem_free_gb: "{{ hc.stdout.split('|')[2] | default('N/A') | trim }}"
+          disk_c_free: "{{ hc.stdout.split('|')[3] | default('N/A') | trim }}"
+          disk_d_free: "{{ hc.stdout.split('|')[4] | default('N/A') | trim }}"
+          stopped_services: "{{ hc.stdout.split('|')[5] | default('None') | trim }}"
+          sys_errors: "{{ hc.stdout.split('|')[6] | default('0') | trim }}"
+          app_errors: "{{ hc.stdout.split('|')[7] | default('0') | trim }}"
+          last_patch_date: "{{ hc.stdout.split('|')[8] | default('Never') | trim }}"
+          backup_status: "{{ hc.stdout.split('|')[9] | default('No Backup Configured') | trim }}"
 
-    - name: Generate timestamp ONCE on localhost (critical fix)
+    - name: Generate consolidated CSV report (runs ONCE after ALL hosts finish)
       delegate_to: localhost
       run_once: true
-      set_fact:
-        report_timestamp: "{{ '%Y%m%d_%H%M%S' | strftime }}"
-      when: hostvars[inventory_hostname].report_timestamp is not defined
-
-    - name: Build and email report from localhost (atomic operation)
-      delegate_to: localhost
-      run_once: true
-      vars:
-        report_file: "/tmp/health_{{ hostvars[inventory_hostname].report_timestamp }}.csv"
+      when: inventory_hostname == ansible_play_hosts[-1]  # Only LAST host triggers this
       block:
-        - name: Create CSV content with EXACT requested columns
-          set_fact:
-            csv_content: |
-              Hostname,IP,UptimeDays,CPU%,MemFreeGB,DiskC_Free%,DiskD_Free%,StoppedServices,SystemErrors24h,AppErrors24h,LastPatchDate,BackupStatus
-              {{ inventory_hostname }},{{ ansible_host }},{{ uptime_days }},{{ cpu_pct }},{{ mem_free_gb }},{{ disk_c_free }},{{ disk_d_free }},{{ stopped_services }},{{ sys_errors }},{{ app_errors }},{{ last_patch_date }},{{ backup_status }}
-
-        - name: Write CSV file
+        - name: Build CSV with ALL hosts using hostvars (memory efficient)
           copy:
-            content: "{{ csv_content }}"
+            content: |
+              Hostname,IP,UptimeDays,CPU%,MemFreeGB,DiskC_Free%,DiskD_Free%,StoppedServices,SystemErrors24h,AppErrors24h,LastPatchDate,BackupStatus
+              {% for host in ansible_play_hosts | sort %}
+              {{ host }},{{ hostvars[host].ansible_host | default('N/A') }},{{ hostvars[host].health_data.uptime_days | default('N/A') }},{{ hostvars[host].health_data.cpu_pct | default('N/A') }},{{ hostvars[host].health_data.mem_free_gb | default('N/A') }},{{ hostvars[host].health_data.disk_c_free | default('N/A') }},{{ hostvars[host].health_data.disk_d_free | default('N/A') }},{{ hostvars[host].health_data.stopped_services | default('N/A') | replace(',', ';') }},{{ hostvars[host].health_data.sys_errors | default('0') }},{{ hostvars[host].health_data.app_errors | default('0') }},{{ hostvars[host].health_data.last_patch_date | default('Never') }},{{ hostvars[host].health_data.backup_status | default('Unknown') }}
+              {% endfor %}
             dest: "{{ report_file }}"
             mode: '0644'
 
-        - name: Send email with report attached (USES INVENTORY HOSTNAME)
+        - name: Email consolidated report
           community.general.mail:
             host: "{{ smtp_server }}"
             port: "{{ smtp_port }}"
@@ -109,22 +92,20 @@
             password: "{{ vault_smtp_password }}"
             secure: starttls
             to: "{{ email_recipient }}"
-            subject: "✅ Health Report - {{ inventory_hostname }} ({{ '%Y-%m-%d' | strftime }})"
+            subject: "✅ Windows Health Report - {{ ansible_play_hosts | length }} servers ({{ '%Y-%m-%d' | strftime }})"
             body: |
-              Health check completed for: {{ inventory_hostname }}
-              IP: {{ ansible_host }}
+              Daily health check completed for {{ ansible_play_hosts | length }} Windows servers.
               
-              Uptime: {{ uptime_days }} days
-              CPU: {{ cpu_pct }}%
-              Memory Free: {{ mem_free_gb }} GB
-              Disk C: {{ disk_c_free }}% free
-              Disk D: {{ disk_d_free }}% free
-              Stopped Services: {{ stopped_services }}
-              System Errors (24h): {{ sys_errors }}
-              Application Errors (24h): {{ app_errors }}
-              Last Patch: {{ last_patch_date }}
-              Backup Status: {{ backup_status }}
+              Top 5 servers with issues:
+              {% set issues = ansible_play_hosts | select('match', '.*') | map('extract', hostvars) | selectattr('health_data.stopped_services', 'ne', 'None') | list %}
+              {% if issues | length > 0 %}
+              {% for host in issues[:5] %}
+              • {{ host.inventory_hostname }}: {{ host.health_data.stopped_services }}
+              {% endfor %}
+              {% else %}
+              ✅ All servers healthy!
+              {% endif %}
               
-              Full report with all metrics attached.
+              Full report with all {{ ansible_play_hosts | length }} servers attached.
             attach: "{{ report_file }}"
           ignore_errors: yes
