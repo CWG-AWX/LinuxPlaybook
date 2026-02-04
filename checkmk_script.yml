@@ -2,12 +2,33 @@
 - name: Offline Install Checkmk Agent - Ubuntu
   hosts: all
   become: yes
+
   vars:
-    script_filename: "check-mk-agent_2.4.0p20-1_all.deb"
+    script_filename: "Checkmk_linux.txt"
+    username: "testuser"
 
   tasks:
-    - name: Copy Checkmk agent to the server
+
+    - name: Set expiry date (3 days from now)
+      command: date -d "+3 days" +%Y-%m-%d
+      register: expiry_date
+      changed_when: false
+
+    - name: Create user that expires after 3 days
+      user:
+        name: "{{ username }}"
+        shell: /bin/bash
+        create_home: yes
+        expires: "{{ expiry_date.stdout | to_datetime('%Y-%m-%d') | as_timestamp }}"
+        state: present
+
+    - name: Copy Checkmk script to server
       copy:
-        src: "{{ agent_filename }}"
-        dest: "/tmp/{{ agent_filename }}"
-        mode: '0644'
+        src: "{{ script_filename }}"
+        dest: "/tmp/{{ script_filename }}"
+        mode: '0755'
+
+    - name: Execute Checkmk script
+      command: "/tmp/{{ script_filename }}"
+      args:
+        chdir: /tmp
