@@ -1,0 +1,44 @@
+---
+- name: Deploy CheckMK Agent to Target Hosts
+  hosts: all  
+  become: true  
+  vars:
+    agent_source: "check-mk-agent_2.4.0p20-1_all.deb"  
+    agent_dest: "/tmp/check-mk-agent_2.4.0p20-1_all.deb"
+
+  tasks:
+    - name: Copy CheckMK agent to target host
+      copy:
+        src: "{{ agent_source }}"
+        dest: "{{ agent_dest }}"
+        mode: '0644'
+        owner: root
+        group: root
+      register: copy_result
+      changed_when: copy_result.changed
+
+    - name: Install CheckMK agent package
+      apt:
+        deb: "{{ agent_dest }}"
+        state: present
+        force: yes  
+      register: install_result
+
+    - name: Fix broken dependencies (if needed)
+      apt:
+        fix_broken: yes
+        state: present
+      when: install_result.failed | default(false)
+      ignore_errors: yes  
+
+    - name: Verify agent installation
+      command: dpkg-query -W -f='${Status}' check-mk-agent
+      register: verify_install
+      changed_when: false
+      failed_when: "'install ok installed' not in verify_install.stdout"
+
+    - name: Cleanup installer file
+      file:
+        path: "{{ agent_dest }}"
+        state: absent
+      when: install_result is succeeded
