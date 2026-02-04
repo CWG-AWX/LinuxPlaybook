@@ -1,0 +1,13 @@
+---
+- name: Offline Install Checkmk Agent - Ubuntu
+  hosts: all
+  become: yes
+  vars:
+    script_filename: "check-mk-agent_2.4.0p20-1_all.deb"
+
+  tasks:
+    - name: Copy Checkmk agent to the server
+      copy:
+        src: "{{ agent_filename }}"
+        dest: "/tmp/{{ agent_filename }}"
+        mode: '0644'
