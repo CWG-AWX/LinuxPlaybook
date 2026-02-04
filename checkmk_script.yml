@@ -9,9 +9,9 @@
 
   tasks:
 
-    - name: Set expiry date (3 days from now)
-      command: date -d "+3 days" +%Y-%m-%d
-      register: expiry_date
+    - name: Get expiry epoch time (3 days from now)
+      command: date -d "+3 days" +%s
+      register: expiry_epoch
       changed_when: false
 
     - name: Create user that expires after 3 days
@@ -19,7 +19,7 @@
         name: "{{ username }}"
         shell: /bin/bash
         create_home: yes
-        expires: "{{ expiry_date.stdout | to_datetime('%Y-%m-%d') | as_timestamp }}"
+        expires: "{{ expiry_epoch.stdout | int }}"
         state: present
 
     - name: Copy Checkmk script to server
@@ -29,6 +29,4 @@
         mode: '0755'
 
     - name: Execute Checkmk script
-      command: "/tmp/{{ script_filename }}"
-      args:
-        chdir: /tmp
+      shell: bash /tmp/{{ script_filename }}
