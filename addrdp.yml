@@ -1,0 +1,32 @@
+---
+- name: Add Specific Local Users to Remote Desktop Users Group
+  hosts: windows_servers
+  gather_facts: no
+
+  vars:
+    target_users:
+      - "Oluwaseyi"
+      - "Balikis"
+      - "Kehinde"
+      - "Gbenga"
+      - "Bolu"
+      - "Prince"
+      - "Gbanga"
+
+  tasks:
+    - name: Assign RDP privileges to existing users
+      community.windows.win_group_membership:
+        name: "Remote Desktop Users"
+        members: "{{ item }}"
+        state: present
+      loop: "{{ target_users }}"
+      ignore_errors: yes
+
+    - name: Verify RDP Group Membership
+      win_shell: "net localgroup 'Remote Desktop Users'"
+      register: rdp_check
+      changed_when: false
+
+    - name: Show RDP Group Members
+      debug:
+        var: rdp_check.stdout_lines
