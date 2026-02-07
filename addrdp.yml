@@ -1,7 +1,7 @@
 ---
 - name: Add Local Users to RDP Group via PowerShell
-  hosts: windows_servers
-  gather_facts: no
+  hosts: all
+  gather_facts: yes
 
   vars:
     # Extracted list from your image + Gbanga
