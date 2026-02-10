@@ -7,6 +7,7 @@
     - name: Ping Google DNS (8.8.8.8)
       ansible.builtin.command: ping -c 4 8.8.8.8
       register: ping_result
+      ignore_errors: yes
 
     - name: Show ping output
       ansible.builtin.debug:
