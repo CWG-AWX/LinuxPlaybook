@@ -9,7 +9,7 @@
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
     smtp_pass: "{{ vault_smtp_password }}" 
-    email_recipient: "michael.obateru@cwg-plc.com"
+    email_recipient: "michael.obateru@cwg-plc.com, abdullateef.adekogbe@cwg-plc.com"
 
   tasks:
     - name: 1. Initialize variables
