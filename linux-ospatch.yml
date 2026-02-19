@@ -1,0 +1,120 @@
+---
+- name: Multi-OS Security Patching & Audit Reporting
+  hosts: all
+  become: yes
+  ignore_unreachable: yes
+  vars:
+    report_file: "/tmp/patch_audit_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
+    smtp_server: "smtp.gmail.com"
+    smtp_port: 587
+    smtp_user: "ignioservices@gmail.com"
+    smtp_pass: "{{ vault_smtp_password }}" 
+    email_recipient: "michael.obateru@cwg-plc.com, abdullateef.adekogbe@cwg-plc.com"
+
+  tasks:
+    - name: 1. Initialize variables
+      set_fact:
+        patch_status: "No updates needed"
+        reboot_required: "No"
+        reporting_ip: "{{ ansible_default_ipv4.address | default(ansible_all_ipv4_addresses[0] | default(inventory_hostname)) }}"
+        full_os_name: "{{ ansible_distribution | default('Unknown') }} {{ ansible_distribution_version | default('OS') }}"
+        actual_hostname: "{{ ansible_hostname | default(inventory_hostname) }}"
+
+    # --- UNREACHABLE HANDLER ---
+    - name: Handle Unreachable Hosts
+      set_fact:
+        patch_status: "UNREACHABLE"
+        reboot_required: "N/A"
+      when: ansible_os_family is undefined
+
+    # --- RHEL / CENTOS SECTION ---
+    - name: 2. Patch RedHat Family
+      block:
+        - name: RHEL | Attempt to install reboot check tools
+          package:
+            name: yum-utils
+            state: present
+          ignore_errors: yes
+
+        - name: RHEL | Upgrade Packages
+          package:
+            name: "*"
+            state: latest
+          register: rhel_out
+
+        - name: RHEL | Check if reboot is required
+          shell: |
+            if command -v needs-restarting >/dev/null 2>&1; then
+              needs-restarting -r
+            else
+              echo "tool-missing"
+            fi
+          register: rhel_reboot_check
+          failed_when: rhel_reboot_check.rc not in [0, 1]
+          changed_when: false
+
+        - name: RHEL | Record Status
+          set_fact:
+            patch_status: "{{ 'Success' if rhel_out.changed else 'No updates needed' }}"
+            reboot_required: >-
+              {% if rhel_reboot_check.rc == 1 %}Yes{% elif rhel_reboot_check.stdout == 'tool-missing' %}Unknown (Missing Tools){% else %}No{% endif %}
+      when: ansible_os_family is defined and ansible_os_family == "RedHat"
+      rescue:
+        - set_fact:
+            patch_status: "Failed"
+
+    # --- DEBIAN / UBUNTU SECTION ---
+    - name: 3. Patch Debian Family
+      block:
+        - name: Debian | Upgrade
+          apt:
+            upgrade: dist
+            update_cache: yes
+          register: deb_out
+
+        - name: Debian | Check Reboot
+          stat:
+            path: /var/run/reboot-required
+          register: reboot_file
+
+        - name: Debian | Record Status
+          set_fact:
+            patch_status: "{{ 'Success' if deb_out.changed else 'No updates needed' }}"
+            reboot_required: "{{ 'Yes' if reboot_file.stat.exists else 'No' }}"
+      when: ansible_os_family is defined and ansible_os_family == "Debian"
+      rescue:
+        - set_fact:
+            patch_status: "Failed"
+
+    # --- REPORT GENERATION ---
+    - name: 4. Build Report Header
+      run_once: true
+      delegate_to: localhost
+      become: no
+      copy:
+        dest: "{{ report_file }}"
+        content: "Hostname,IP,OS_Version,Status,Reboot_Required,Timestamp\n"
+
+    - name: 5. Append host data to CSV
+      delegate_to: localhost
+      become: no
+      throttle: 1
+      lineinfile:
+        path: "{{ report_file }}"
+        line: "{{ actual_hostname }},{{ reporting_ip }},{{ full_os_name }},{{ patch_status }},{{ reboot_required }},{{ ansible_date_time.iso8601 | default(lookup('pipe','date --iso-8601=seconds')) }}"
+      ignore_errors: yes
+
+    - name: 6. Send Email
+      run_once: true
+      delegate_to: localhost
+      become: no
+      community.general.mail:
+        host: "{{ smtp_server }}"
+        port: "{{ smtp_port }}"
+        username: "{{ smtp_user }}"
+        password: "{{ smtp_pass }}"
+        secure: starttls
+        to: "{{ email_recipient }}"
+        subject: "PROD AUDIT: OS Patching Report"
+        body: "Patching cycle complete. Attached is the audit report including reachable and unreachable hosts."
+        attach: "{{ report_file }}"

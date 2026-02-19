@@ -1,0 +1,24 @@
+---
+plugin: nutanix.ncp.ntnx_prism_vm_inventory
+nutanix_hostname: "10.20.24.5" 
+#nutanix_username: ""
+#nutanix_password: "" 
+validate_certs: false
+fetch_all_entities: true
+hostvars_prefix: "ntnx_"
+include_vms_with_power_state:
+  - 'on'
+  
+compose:
+  ansible_host: address_ips[0]
+  ignore_host: address_ips | length == 0
+exclude:
+  - ntnx_ignore_host
+keyed_groups:
+  - prefix: vlan
+    key: ntnx_nic_list | map(attribute='subnet_name') | list
+    separator: "_"
+#keyed_groups:
+#  - prefix: nutanix_vlan
+#    key: subnet_name
+#    separator: "_"

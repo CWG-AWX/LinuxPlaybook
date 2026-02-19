@@ -1,0 +1,35 @@
+---
+- name: Onboard Zabbix Agent from Local AWX Repo
+  hosts: all
+  become: yes
+  vars:
+    zabbix_repo_url: "http://192.168.122.140:8080"
+    zabbix_version: "7.2.7"
+
+  tasks:
+    - name: Install Zabbix Agent on RHEL/CentOS
+      when: ansible_os_family == "RedHat"
+      shell: |
+        dnf install -y {{ zabbix_repo_url }}/rhel/zabbix-agent*.rpm
+
+    - name: Install Zabbix Agent on Ubuntu/Debian
+      when: ansible_os_family == "Debian"
+      shell: |
+        wget -q {{ zabbix_repo_url }}/ubuntu/zabbix-agent*.deb -P /tmp/
+        dpkg -i /tmp/zabbix-agent*.deb || apt-get install -f -y
+
+    - name: Configure Zabbix Agent
+      lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^Server=', line: "Server=192.168.184.84" }
+        - { regexp: '^ServerActive=', line: "ServerActive=192.168.184.84" }
+        - { regexp: '^Hostname=', line: "Hostname={{ inventory_hostname }}" }
+
+    - name: Enable and start Zabbix Agent service
+      service:
+        name: zabbix-agent
+        state: started
+        enabled: yes

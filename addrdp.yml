@@ -1,0 +1,43 @@
+---
+- name: Add Local Users to RDP Group via PowerShell
+  hosts: all
+  gather_facts: yes
+
+  vars:
+    # Extracted list from your image + Gbanga
+    target_users:
+      - "Oluwaseyi"
+      - "Balikis"
+      - "Kehinde"
+      - "Gbenga"
+      - "Bolu"
+      - "Prince"
+      - "Gbanga"
+
+  tasks:
+    - name: Ensure users are added to Remote Desktop Users
+      win_shell: |
+        $user = "{{ item }}"
+        $group = "Remote Desktop Users"
+        
+        # Check if user exists on this specific server
+        if (Get-LocalUser -Name $user -ErrorAction SilentlyContinue) {
+            # Check if they are already in the group to avoid redundant errors
+            if (-not (Get-LocalGroupMember -Group $group | Where-Object { $_.Name -like "*\$user" -or $_.Name -eq $user })) {
+                Add-LocalGroupMember -Group $group -Member $user -ErrorAction SilentlyContinue
+                Write-Host "SUCCESS: Added $user to $group"
+            } else {
+                Write-Host "SKIP: $user is already a member of $group"
+            }
+        } else {
+            Write-Host "SKIP: User $user does not exist on this server"
+        }
+      loop: "{{ target_users }}"
+      register: shell_results
+
+    - name: Report Summary
+      debug:
+        msg: "{{ item.stdout }}"
+      loop: "{{ shell_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"

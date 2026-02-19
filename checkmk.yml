@@ -1,0 +1,43 @@
+---
+- name: Offline Install Checkmk Agent - Ubuntu
+  hosts: all
+  become: yes
+  vars:
+    agent_filename: "check-mk-agent_2.4.0p20-1_all.deb"
+
+  tasks:
+    - name: Copy Checkmk agent to the server
+      copy:
+        src: "{{ agent_filename }}"
+        dest: "/tmp/{{ agent_filename }}"
+        mode: '0644'
+
+    - name: Install package (Offline Mode)
+      apt:
+        deb: "/tmp/{{ agent_filename }}"
+        state: present
+        update_cache: no
+
+    - name: Verify installation status
+      command: dpkg-query -W -f='${Status}' check-mk-agent
+      register: pkg_check
+      failed_when: "'install ok installed' not in pkg_check.stdout"
+      changed_when: false
+
+    - name: Ensure Checkmk socket is enabled
+      systemd:
+        name: check-mk-agent.socket
+        enabled: yes
+        state: started
+      ignore_errors: yes
+
+    - name: Cleanup temporary file
+      file:
+        path: "/tmp/{{ agent_filename }}"
+        state: absent
+
+    - name: Final Check - Run agent locally
+      command: check_mk_agent
+      register: agent_run
+      failed_when: agent_run.stdout == ""
+      changed_when: false

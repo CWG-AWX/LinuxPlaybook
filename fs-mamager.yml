@@ -1,0 +1,13 @@
+---
+- name: Run fs-manager3.sh script on remote VMs
+  hosts: all
+  become: yes
+  tasks:
+    - name: Copy script from AWX host to remote VM
+      copy:
+        src: /var/lib/awx/projects/scripts/fs-manager3.sh
+        dest: /tmp/fs-manager3.sh
+        mode: '0755'
+
+    - name: Execute the script on the remote VM
+      command: /tmp/fs-manager3.sh

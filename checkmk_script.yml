@@ -1,0 +1,71 @@
+---
+- name: Deploy Checkmk Agent and Expiring Test User
+  hosts: all
+  become: yes
+
+  vars:
+    script_filename: "Checkmk_linux.sh"
+    username: "testuser2"
+    # SHA-512 Hash for 'cwgcwg'
+    password_hash: "$6$rounds=656000$yR/8S.6.R4M/f$yqV0/x7fT69vNisP6S6I/O5F7sNfNf6M0K4j9W.5JqE2T8jX6m9n7V.rO5L7oP3U1vG5M7Z9A8H1"
+
+  tasks:
+    # --- 1. USER & PASSWORD ---
+    - name: Create test user with password
+      user:
+        name: "{{ username }}"
+        shell: /bin/bash
+        create_home: yes
+        password: "{{ password_hash }}"
+        state: present
+
+    - name: Set password to expire in 3 days
+      shell: "chage -M 3 {{ username }}"
+      changed_when: true
+
+    # --- 2. FIREWALL ---
+    - name: Open port 6556 (UFW)
+      ufw:
+        rule: allow
+        port: '6556'
+        proto: tcp
+      ignore_errors: yes # In case UFW isn't present
+
+    - name: Open port 6556 (IPTables)
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: '6556'
+        jump: ACCEPT
+        comment: "Allow Checkmk"
+      ignore_errors: yes
+
+    # --- 3. SCRIPT EXECUTION ---
+    - name: Copy Checkmk bootstrap script
+      copy:
+        # This script content is the one you provided (fixed)
+        src: "{{ script_filename }}"
+        dest: "/tmp/{{ script_filename }}"
+        mode: '0755'
+
+    - name: Execute Checkmk bootstrap script
+      shell: "bash /tmp/{{ script_filename }}"
+      register: script_output
+
+    - name: Cleanup script
+      file:
+        path: "/tmp/{{ script_filename }}"
+        state: absent
+
+    # --- 4. VERIFICATION ---
+    - name: Final Expiry Check
+      shell: "chage -l {{ username }} | grep 'Password expires'"
+      register: expiry_status
+      changed_when: false
+
+    - name: Report Status
+      debug:
+        msg: 
+          - "User created: {{ username }}"
+          - "{{ expiry_status.stdout }}"
+          - "Script output: {{ script_output.stdout_lines[-1] }}"
