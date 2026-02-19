@@ -1,0 +1,50 @@
+---
+- name: Install and Configure CrowdStrike Falcon Sensor
+  hosts: all
+  become: yes
+  vars:
+    # Defining variables based on your requirements
+    falcon_cid: "712BFC65A93944C0A66711B2541AC1D3-4B"
+    falcon_rpm: "falcon-sensor-7.34.0-18708.el9.x86_64.rpm"
+
+  tasks:
+    - name: Ensure /opt directory exists
+      ansible.builtin.file:
+        path: /opt
+        state: directory
+        mode: '0755'
+
+    - name: Copy the Falcon RPM to /opt
+      ansible.builtin.copy:
+        src: "{{ falcon_rpm }}"
+        dest: "/opt/{{ falcon_rpm }}"
+        mode: '0644'
+
+    - name: Install the Falcon Sensor RPM
+      ansible.builtin.yum:
+        name: "/opt/{{ falcon_rpm }}"
+        state: present
+        disable_gpg_check: yes
+
+    - name: Configure Falcon Sensor with CID
+      ansible.builtin.command:
+        cmd: "/opt/CrowdStrike/falconctl -s --cid={{ falcon_cid }}"
+      register: falcon_config
+      # This prevents the task from showing "changed" every single time if already set
+      changed_when: "'Commit successful' in falcon_config.stdout"
+
+    - name: Start and Enable Falcon Sensor service
+      ansible.builtin.systemd:
+        name: falcon-sensor
+        state: started
+        enabled: yes
+
+    - name: Check Falcon Sensor status
+      ansible.builtin.command:
+        cmd: "systemctl status falcon-sensor.service"
+      register: sensor_status
+      changed_when: false
+
+    - name: Display Sensor Status
+      ansible.builtin.debug:
+        var: sensor_status.stdout_lines
