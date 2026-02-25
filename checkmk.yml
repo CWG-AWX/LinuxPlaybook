@@ -3,7 +3,7 @@
   hosts: all
   become: yes
   vars:
-    agent_filename: "check-mk-agent-2.4.0p20-1.noarch (1).rpm"
+    agent_filename: "check-mk-agent-2.4.0p20-1.noarch.rpm"
 
   tasks:
     - name: Copy Checkmk agent to the server
