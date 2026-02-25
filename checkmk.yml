@@ -1,9 +1,9 @@
 ---
-- name: Offline Install Checkmk Agent - Ubuntu
+- name: Offline Install Checkmk Agent - Ubuntu and Rhel
   hosts: all
   become: yes
   vars:
-    agent_filename: "check-mk-agent_2.4.0p20-1_all.deb"
+    agent_filename: "check-mk-agent-2.4.0p20-1.noarch (1).rpm"
 
   tasks:
     - name: Copy Checkmk agent to the server
