@@ -12,17 +12,29 @@
         dest: "/tmp/{{ agent_filename }}"
         mode: '0644'
 
+    #- name: Install package (Offline Mode)
+      #apt:
+        #deb: "/tmp/{{ agent_filename }}"
+        #state: present
+        #update_cache: no
+
+    #- name: Verify installation status
+      #command: dpkg-query -W -f='${Status}' check-mk-agent
+      #register: pkg_check
+      #failed_when: "'install ok installed' not in pkg_check.stdout"
+      #changed_when: false
+
     - name: Install package (Offline Mode)
-      apt:
-        deb: "/tmp/{{ agent_filename }}"
+      dnf:
+        name: "/tmp/{{ agent_filename }}"
         state: present
-        update_cache: no
+        disable_gpg_check: yes
 
     - name: Verify installation status
-      command: dpkg-query -W -f='${Status}' check-mk-agent
+      command: rpm -q check-mk-agent
       register: pkg_check
-      failed_when: "'install ok installed' not in pkg_check.stdout"
-      changed_when: false
+      failed_when: pkg_check.rc != 0
+      changed_when: false 
 
     - name: Ensure Checkmk socket is enabled
       systemd:
