@@ -1,0 +1,56 @@
+---
+- name: Offline Windows Update from Internal Patch Repository
+  hosts: all
+  gather_facts: no
+
+  vars:
+    patch_server: "coMFBAPI-test"
+    share_name: "windows_updates"
+    os_folder: "windows2022"
+
+    update_file: "windows10.0-kb5075906-x64_96e7590a40fbfde94dd84e3ed743ccd735f54654.msu"
+
+    share_path: "\\\\{{ patch_server }}\\{{ share_name }}\\{{ os_folder }}\\{{ update_file }}"
+    local_path: "C:\\Temp\\{{ update_file }}"
+
+    # SHA1 hash (from file)
+    expected_hash: "96e7590a40fbfde94dd84e3ed743ccd735f54654"
+
+  tasks:
+
+    - name: Ensure Temp directory exists
+      win_file:
+        path: C:\Temp
+        state: directory
+
+    - name: Copy update from patch repository (SMB)
+      win_copy:
+        src: "{{ share_path }}"
+        dest: "{{ local_path }}"
+        remote_src: yes
+
+    - name: Validate SHA1 hash (security check)
+      win_stat:
+        path: "{{ local_path }}"
+        checksum_algorithm: sha1
+      register: file_info
+
+    - name: Fail if hash mismatch
+      fail:
+        msg: "Update file hash mismatch. Installation aborted."
+      when: file_info.stat.checksum != expected_hash
+
+    - name: Install Windows update (offline)
+      win_hotfix:
+        source: "{{ local_path }}"
+        state: present
+      register: patch_result
+
+    - name: Reboot if required
+      win_reboot:
+      when: patch_result.reboot_required
+
+    - name: Cleanup installer file
+      win_file:
+        path: "{{ local_path }}"
+        state: absent
