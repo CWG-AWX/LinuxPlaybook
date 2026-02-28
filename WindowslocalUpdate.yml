@@ -1,56 +1,143 @@
 ---
-- name: Offline Windows Update from Internal Patch Repository
+- name: Offline Windows Patch Deployment & Audit Reporting
   hosts: all
-  gather_facts: no
+  gather_facts: yes
 
   vars:
+    # -------- PATCH VARIABLES --------
     patch_server: "coMFBAPI-test"
     share_name: "windows_updates"
     os_folder: "windows2022"
-
     update_file: "windows10.0-kb5075906-x64_96e7590a40fbfde94dd84e3ed743ccd735f54654.msu"
 
     share_path: "\\\\{{ patch_server }}\\{{ share_name }}\\{{ os_folder }}\\{{ update_file }}"
     local_path: "C:\\Temp\\{{ update_file }}"
 
-    # SHA1 hash (from file)
     expected_hash: "96e7590a40fbfde94dd84e3ed743ccd735f54654"
+
+    # -------- REPORT VARIABLES --------
+    report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
+    email_recipient: "abdullateef.adekogbe@cwg-plc.com"
+    smtp_server: "smtp.gmail.com"
+    smtp_port: 587
+    smtp_user: "ignioservices@gmail.com"
 
   tasks:
 
-    - name: Ensure Temp directory exists
-      win_file:
-        path: C:\Temp
-        state: directory
+    # --------------------------------------------------
+    # 1️⃣ INITIALIZE REPORT VARIABLES
+    # --------------------------------------------------
 
-    - name: Copy update from patch repository (SMB)
-      win_copy:
-        src: "{{ share_path }}"
-        dest: "{{ local_path }}"
-        remote_src: yes
+    - name: Initialize reporting variables
+      set_fact:
+        patch_status: "Not Started"
+        reboot_status: "No reboot performed"
+        reporting_ip: "{{ ansible_host | default(inventory_hostname) }}"
+        full_os_name: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
 
-    - name: Validate SHA1 hash (security check)
-      win_stat:
-        path: "{{ local_path }}"
-        checksum_algorithm: sha1
-      register: file_info
+    # --------------------------------------------------
+    # 2️⃣ OFFLINE PATCH INSTALLATION BLOCK
+    # --------------------------------------------------
 
-    - name: Fail if hash mismatch
-      fail:
-        msg: "Update file hash mismatch. Installation aborted."
-      when: file_info.stat.checksum != expected_hash
+    - name: Execute Offline Patch Installation
+      block:
 
-    - name: Install Windows update (offline)
-      win_hotfix:
-        source: "{{ local_path }}"
-        state: present
-      register: patch_result
+        - name: Ensure Temp directory exists
+          ansible.windows.win_file:
+            path: C:\Temp
+            state: directory
 
-    - name: Reboot if required
-      win_reboot:
-      when: patch_result.reboot_required
+        - name: Copy update from internal patch repository
+          ansible.windows.win_copy:
+            src: "{{ share_path }}"
+            dest: "{{ local_path }}"
+            remote_src: yes
 
-    - name: Cleanup installer file
-      win_file:
-        path: "{{ local_path }}"
-        state: absent
+        - name: Validate SHA1 checksum
+          ansible.windows.win_stat:
+            path: "{{ local_path }}"
+            checksum_algorithm: sha1
+          register: file_info
+
+        - name: Stop if hash mismatch
+          fail:
+            msg: "Update file hash mismatch. Installation aborted."
+          when: file_info.stat.checksum != expected_hash
+
+        - name: Install Windows update (offline)
+          ansible.windows.win_hotfix:
+            source: "{{ local_path }}"
+            state: present
+          register: patch_result
+
+        - name: Record patch result
+          set_fact:
+            patch_status: "{{ 'Success' if patch_result.changed else 'Already Installed' }}"
+            reboot_status: "{{ 'Reboot Required' if patch_result.reboot_required else 'No reboot needed' }}"
+
+        - name: Reboot if required
+          ansible.windows.win_reboot:
+          when: patch_result.reboot_required
+
+        - name: Cleanup installer file
+          ansible.windows.win_file:
+            path: "{{ local_path }}"
+            state: absent
+
+      rescue:
+        - name: Handle patch failure
+          set_fact:
+            patch_status: "Failed"
+            reboot_status: "Error: {{ ansible_failed_result.msg | default('Unknown') }}"
+
+    # --------------------------------------------------
+    # 3️⃣ REPORT GENERATION
+    # --------------------------------------------------
+
+    - name: Create CSV Header
+      run_once: true
+      delegate_to: localhost
+      become: no
+      copy:
+        dest: "{{ report_file }}"
+        content: "Hostname,IP_Address,OS_Version,Patch_Status,Reboot_Action,Timestamp\n"
+
+    - name: Append host data to CSV
+      delegate_to: localhost
+      become: no
+      throttle: 1
+      lineinfile:
+        path: "{{ report_file }}"
+        line: "{{ inventory_hostname }},{{ reporting_ip }},{{ full_os_name }},{{ patch_status }},{{ reboot_status }},{{ lookup('pipe','date --iso-8601=seconds') }}"
+      ignore_errors: yes
+
+    # --------------------------------------------------
+    # 4️⃣ EMAIL FINAL REPORT
+    # --------------------------------------------------
+
+    - name: Email Final Report
+      run_once: true
+      delegate_to: localhost
+      become: no
+      community.general.mail:
+        host: "{{ smtp_server }}"
+        port: "{{ smtp_port }}"
+        username: "{{ smtp_user }}"
+        password: "{{ vault_smtp_password }}"
+        secure: starttls
+        to: "{{ email_recipient }}"
+        subject: "OFFLINE WINDOWS PATCH REPORT: KB5075906 Deployment Complete"
+        body: |
+          Hi Team,
+
+          Kindly note that offline Windows patch deployment has completed.
+
+          Patch Server: {{ patch_server }}
+          Update File: {{ update_file }}
+
+          Please see attached CSV report for full audit details.
+
+          Regards,
+          AWX Automation
+        attach: "{{ report_file }}"
+      when: report_file is exists
