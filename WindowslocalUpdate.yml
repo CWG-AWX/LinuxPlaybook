@@ -1,32 +1,31 @@
 ---
 - name: Windows Multi-Host Security Patching & Audit Reporting (File-Based Patch)
   hosts: all
-  gather_facts: yes  # Required to find the User Profile path
+  gather_facts: yes
   
   vars:
     # --- PATCH FILE CONFIG ---
-    # Path inside the AWX Pod (linked to your host)
-    # UPDATE THIS: Change to your actual patch filename (.msu/.exe/.msi)
-    src_patch: "/mnt/updates/windows/windows10.0-kb5075906-x64_96e7590a40fbfde94dd84e3ed743ccd735f54654.msu"
+    src_patch: "/mnt/updates/windows/windows10.0-kb5075906-x64_96e7590a40fbfde94dd84e3ed743ccd735f54654.msu"  # UPDATE to your actual .msu file
+    # We'll copy to a simple, privileged path to avoid issues
+    remote_temp_dir: "C:\\Windows\\Temp"
+    remote_patch_path: "{{ remote_temp_dir }}\\patch_install.msu"
     
-    # --- REPORTING & SMTP CONFIG (Exact from your playbook) ---
+    # --- REPORTING & SMTP CONFIG ---
     report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
     email_recipient: "abdullateef.adekogbe@cwg-plc.com"
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
-    # password should be provided via vault: vault_smtp_password
 
   tasks:
     # ============================================================
-    # EXACT COPY PLAYBOOK SNIPPET (AS PROVIDED BY USER) - UNCHANGED
+    # COPY PLAYBOOK SNIPPET (ADAPTED FOR SIMPLER PATH)
     # ============================================================
-    - name: Set the destination path dynamically
+    - name: Set the destination path dynamically (simple temp path)
       set_fact:
-        # This points to C:\Users\<Current_User>\Downloads
-        dest_path: "{{ ansible_env.USERPROFILE }}\\Downloads\\windows10.0-kb5075906-x64_96e7590a40fbfde94dd84e3ed743ccd735f54654.msu"
+        dest_path: "{{ remote_patch_path }}"
 
-    - name: Ensure the test file exists on the AWX side
+    - name: Ensure the patch file exists on the AWX side
       delegate_to: localhost
       stat:
         path: "{{ src_patch }}"
@@ -37,7 +36,12 @@
         msg: "The path {{ src_patch }} is not visible. Check your Pod Spec Override."
       when: not local_file.stat.exists
 
-    - name: Copy file from Host Mount to Windows Downloads
+    - name: Ensure remote temp directory exists
+      win_file:
+        path: "{{ remote_temp_dir }}"
+        state: directory
+
+    - name: Copy patch file to Windows Temp folder
       win_copy:
         src: "{{ src_patch }}"
         dest: "{{ dest_path }}"
@@ -49,7 +53,7 @@
       when: copy_res.changed
 
     # ============================================================
-    # PATCH INSTALLATION & REBOOT LOGIC (FIXED)
+    # PATCH INSTALLATION LOGIC (FIXED FOR RC 5)
     # ============================================================
     - name: 1. Initialize reporting variables
       set_fact:
@@ -57,46 +61,68 @@
         reboot_status: "No reboot performed"
         reporting_ip: "{{ ansible_host | default(inventory_hostname) }}"
         full_os_name: "{{ ansible_distribution | default('Windows') }} {{ ansible_distribution_version | default(ansible_os_version) }}"
+        kb_number: ""  # Will extract from filename if possible
+
+    - name: Extract KB number from filename (for pre-check)
+      set_fact:
+        kb_number: "{{ dest_path | regex_search('kb[0-9]+', ignorecase=True) | default('') | lower }}"
+      when: copy_res.changed
 
     - name: 2. Install the Windows Patch File
       block:
-        - name: Install .msu patch (Windows Update Standalone Installer)
+        # Pre-check: Is this KB already installed?
+        - name: Check if KB is already installed via Get-HotFix
+          win_shell: |
+            $kb = "{{ kb_number }}"
+            if ($kb -and (Get-HotFix -Id $kb -ErrorAction SilentlyContinue)) {
+                Write-Output "ALREADY_INSTALLED"
+                exit 0
+            } else {
+                exit 1
+            }
+          register: hotfix_check
+          changed_when: false
+          failed_when: false
+          when: kb_number != ""
+
+        - name: Skip install if KB already present
+          set_fact:
+            patch_status: "Success (patch already installed)"
+          when: 
+            - kb_number != ""
+            - hotfix_check.stdout is defined
+            - "'ALREADY_INSTALLED' in hotfix_check.stdout"
+
+        # Main install task
+        - name: Install .msu patch via wusa.exe
           win_command: >
             wusa.exe "{{ dest_path }}" /quiet /norestart
           register: install_result
           when: 
             - copy_res.changed
             - dest_path | lower | regex_search('\.msu$')
-          failed_when: install_result.rc != 0 and install_result.rc != 3010
-
-        - name: Install .exe patch (generic silent install)
-          win_command: >
-            "{{ dest_path }}" /S /quiet /norestart
-          register: install_result
-          when:
-            - copy_res.changed
-            - dest_path | lower | regex_search('\.exe$')
-          failed_when: install_result.rc != 0 and install_result.rc != 3010
-
-        - name: Install .msi patch (Windows Installer)
-          win_command: >
-            msiexec /i "{{ dest_path }}" /quiet /norestart
-          register: install_result
-          when:
-            - copy_res.changed
-            - dest_path | lower | regex_search('\.msi$')
-          failed_when: install_result.rc != 0 and install_result.rc != 3010
+            - patch_status != "Success (patch already installed)"
+          failed_when: >
+            install_result.rc != 0 and 
+            install_result.rc not in [0, 3010, 17021]
+          # RC meanings:
+          # 0 = Success
+          # 3010 = Success, reboot required
+          # 17021 = Already installed (sometimes returned by wusa)
+          # 5 = Access Denied (handled in rescue)
+          # 87 = Invalid parameter
 
         - name: Record successful installation
           set_fact:
             patch_status: "Success (1 patch installed)"
-          when: install_result.rc is defined and (install_result.rc == 0 or install_result.rc == 3010)
+          when: 
+            - install_result.rc is defined
+            - install_result.rc in [0, 3010, 17021]
 
-        # ✅ FIXED: Check for pending reboot via PowerShell registry check
+        # Check for pending reboot via registry
         - name: Check if reboot is required post-install (via registry)
           win_shell: |
             $rebootPending = $false
-            # Check common pending reboot registry keys
             if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") { $rebootPending = $true }
             if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") { $rebootPending = $true }
             if (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" -Name PendingFileRenameOperations -ErrorAction SilentlyContinue) { $rebootPending = $true }
@@ -104,9 +130,9 @@
           register: reboot_check
           changed_when: false
           failed_when: false
-          when: install_result.rc is defined
+          when: install_result.rc is defined and install_result.rc in [0, 3010]
 
-        - name: Reboot if installer returned 3010 OR registry check indicates pending reboot
+        - name: Reboot if required
           win_reboot:
             reboot_timeout: 600
             pre_reboot_delay: 10
@@ -121,22 +147,44 @@
           when: reboot_result is defined and reboot_result.rebooted | default(false)
 
       rescue:
-        - name: Handle installation failures
-          set_fact:
-            patch_status: "Failed: {{ ansible_failed_result.msg | default('Unknown error') }}"
-            reboot_status: "Error - installation failed"
+        - name: Handle installation failures with detailed diagnostics
+          block:
+            - name: Gather diagnostic info on failure
+              win_shell: |
+                $info = @{}
+                $info.User = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+                $info.IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+                $info.OS = (Get-WmiObject Win32_OperatingSystem).Caption
+                $info.Arch = (Get-WmiObject Win32_OperatingSystem).OSArchitecture
+                $info | ConvertTo-Json
+              register: diag_info
+              changed_when: false
+              failed_when: false
 
-    - name: Cleanup Patch Installer (optional)
+            - name: Set detailed failure message
+              set_fact:
+                patch_status: "Failed (RC {{ install_result.rc | default('N/A') }}): {{ 
+                  'Access Denied - ensure ansible_svc is local Admin' if install_result.rc == 5 else
+                  'Patch not applicable to this OS' if install_result.rc == 87 else
+                  ansible_failed_result.msg | default('Unknown error')
+                }}"
+                reboot_status: "Error - installation failed"
+                failure_diagnostics: "{{ diag_info.stdout | default('No diagnostics available') }}"
+
+            - name: Show failure diagnostics (debug)
+              debug:
+                msg: "INSTALL FAILED - Diagnostics: {{ failure_diagnostics }}"
+
+    - name: Cleanup Patch Installer
       win_file:
         path: "{{ dest_path }}"
         state: absent
-      when: copy_res.changed and patch_status | regex_search('Success')
+      when: copy_res.changed
       ignore_errors: yes
 
     # ============================================================
-    # EXACT REPORT GENERATION & SMTP SECTION (PRESERVED)
+    # REPORT GENERATION & SMTP (EXACT AS REQUESTED)
     # ============================================================
-
     - name: 3. Create CSV Header
       run_once: true
       delegate_to: localhost
