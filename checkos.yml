@@ -1,0 +1,16 @@
+---
+- name: Windows Server Version Audit
+  hosts: all
+  gather_facts: yes
+  become: true
+
+  tasks:
+
+    - name: Display Windows Server Version Details
+      debug:
+        msg:
+          - "Server: {{ inventory_hostname }}"
+          - "Hostname: {{ ansible_hostname }}"
+          - "OS Name: {{ ansible_distribution }}"
+          - "OS Version: {{ ansible_distribution_version }}"
+          - "Build Number: {{ ansible_os_build }}"
