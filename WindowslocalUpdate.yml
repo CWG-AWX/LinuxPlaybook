@@ -5,23 +5,22 @@
   
   vars:
     # --- PATCH FILE CONFIG ---
-    src_patch: "/mnt/updates/windows/windows10.0-kb5075906-x64_96e7590a40fbfde94dd84e3ed743ccd735f54654.msu"  # UPDATE to your actual .msu file
-    # We'll copy to a simple, privileged path to avoid issues
+    src_patch: "/mnt/updates/windows/windows10.0-kb5075906-x64_96e7590a40fbfde94dd84e3ed743ccd735f54654.msu"
     remote_temp_dir: "C:\\Windows\\Temp"
     remote_patch_path: "{{ remote_temp_dir }}\\patch_install.msu"
     
     # --- REPORTING & SMTP CONFIG ---
     report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
-    email_recipient: "abdullateef.adekogbe@cwg-plc.com, michael.obateru@cwg-plc.com"
+    email_recipient: "abdullateef.adekogbe@cwg-plc.com"
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
 
   tasks:
     # ============================================================
-    # COPY PLAYBOOK SNIPPET (ADAPTED FOR SIMPLER PATH)
+    # PREPARATION & FILE COPY
     # ============================================================
-    - name: Set the destination path dynamically (simple temp path)
+    - name: Set the destination path dynamically
       set_fact:
         dest_path: "{{ remote_patch_path }}"
 
@@ -47,13 +46,8 @@
         dest: "{{ dest_path }}"
       register: copy_res
 
-    - name: Show the result
-      debug:
-        msg: "File successfully copied to {{ dest_path }}"
-      when: copy_res.changed
-
     # ============================================================
-    # PATCH INSTALLATION LOGIC (FIXED FOR RC 5)
+    # PATCH INSTALLATION LOGIC
     # ============================================================
     - name: 1. Initialize reporting variables
       set_fact:
@@ -61,7 +55,7 @@
         reboot_status: "No reboot performed"
         reporting_ip: "{{ ansible_host | default(inventory_hostname) }}"
         full_os_name: "{{ ansible_distribution | default('Windows') }} {{ ansible_distribution_version | default(ansible_os_version) }}"
-        kb_number: ""  # Will extract from filename if possible
+        kb_number: ""
 
     - name: Extract KB number from filename (for pre-check)
       set_fact:
@@ -70,7 +64,6 @@
 
     - name: 2. Install the Windows Patch File
       block:
-        # Pre-check: Is this KB already installed?
         - name: Check if KB is already installed via Get-HotFix
           win_shell: |
             $kb = "{{ kb_number }}"
@@ -93,28 +86,21 @@
             - hotfix_check.stdout is defined
             - "'ALREADY_INSTALLED' in hotfix_check.stdout"
 
-        # Main install task
+        # FIXED: Added become and become_method to prevent RC 5
         - name: Install .msu patch via wusa.exe
           win_command: >
             wusa.exe "{{ dest_path }}" /quiet /norestart
           become: yes
           become_method: runas
-          become_user: ansible_svc
-          register: install_result
           register: install_result
           when: 
             - copy_res.changed
             - dest_path | lower | regex_search('\.msu$')
             - patch_status != "Success (patch already installed)"
           failed_when: >
+            install_result.rc is defined and
             install_result.rc != 0 and 
             install_result.rc not in [0, 3010, 17021]
-          # RC meanings:
-          # 0 = Success
-          # 3010 = Success, reboot required
-          # 17021 = Already installed (sometimes returned by wusa)
-          # 5 = Access Denied (handled in rescue)
-          # 87 = Invalid parameter
 
         - name: Record successful installation
           set_fact:
@@ -123,7 +109,6 @@
             - install_result.rc is defined
             - install_result.rc in [0, 3010, 17021]
 
-        # Check for pending reboot via registry
         - name: Check if reboot is required post-install (via registry)
           win_shell: |
             $rebootPending = $false
@@ -136,14 +121,16 @@
           failed_when: false
           when: install_result.rc is defined and install_result.rc in [0, 3010]
 
+        # FIXED: Added default(0) to handle skipped tasks without crashing
         - name: Reboot if required
           win_reboot:
             reboot_timeout: 600
             pre_reboot_delay: 10
             post_reboot_delay: 30
           register: reboot_result
-          when: 
-            - install_result.rc == 3010 or reboot_check.rc == 3010
+          when: >
+            (install_result.rc | default(0)) == 3010 or 
+            (reboot_check.rc | default(0)) == 3010
           
         - name: Update reboot status
           set_fact:
@@ -158,8 +145,6 @@
                 $info = @{}
                 $info.User = [Security.Principal.WindowsIdentity]::GetCurrent().Name
                 $info.IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-                $info.OS = (Get-WmiObject Win32_OperatingSystem).Caption
-                $info.Arch = (Get-WmiObject Win32_OperatingSystem).OSArchitecture
                 $info | ConvertTo-Json
               register: diag_info
               changed_when: false
@@ -168,16 +153,11 @@
             - name: Set detailed failure message
               set_fact:
                 patch_status: "Failed (RC {{ install_result.rc | default('N/A') }}): {{ 
-                  'Access Denied - ensure ansible_svc is local Admin' if install_result.rc == 5 else
-                  'Patch not applicable to this OS' if install_result.rc == 87 else
-                  ansible_failed_result.msg | default('Unknown error')
+                  'Access Denied - check elevation' if (install_result.rc | default(0)) == 5 else
+                  'Patch not applicable' if (install_result.rc | default(0)) == 87 else
+                  'Unknown error'
                 }}"
                 reboot_status: "Error - installation failed"
-                failure_diagnostics: "{{ diag_info.stdout | default('No diagnostics available') }}"
-
-            - name: Show failure diagnostics (debug)
-              debug:
-                msg: "INSTALL FAILED - Diagnostics: {{ failure_diagnostics }}"
 
     - name: Cleanup Patch Installer
       win_file:
@@ -187,7 +167,7 @@
       ignore_errors: yes
 
     # ============================================================
-    # REPORT GENERATION & SMTP (EXACT AS REQUESTED)
+    # REPORT GENERATION & SMTP
     # ============================================================
     - name: 3. Create CSV Header
       run_once: true
@@ -207,6 +187,15 @@
         line: "{{ inventory_hostname }},{{ reporting_ip }},{{ full_os_name }},{{ patch_status }},{{ reboot_status }},{{ lookup('pipe','date --iso-8601=seconds') }}"
       ignore_errors: yes
 
+    # FIXED: Replaced invalid "is exists" syntax with a proper stat check
+    - name: Check if report file was successfully created
+      run_once: true
+      delegate_to: localhost
+      stat:
+        path: "{{ report_file }}"
+      register: final_report_stat
+      ignore_errors: yes
+
     - name: 5. Email Final Report
       run_once: true
       delegate_to: localhost
@@ -219,7 +208,7 @@
         secure: starttls
         to: "{{ email_recipient }}"
         subject: "PROD WINDOWS AUDIT: Patching Report Complete"
-        body: "Hi Team, Kindly note that Windows patching cycle is complete. See attached csv file for patch report."
+        body: "Hi Team,\n\nKindly note that the Windows patching cycle is complete. See the attached CSV file for the patch report."
         attach: "{{ report_file }}"
-      when: report_file is exists
+      when: final_report_stat.stat.exists | default(false)
       ignore_errors: yes
