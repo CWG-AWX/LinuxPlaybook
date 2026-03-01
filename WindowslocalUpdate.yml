@@ -19,7 +19,7 @@
 
   tasks:
     # ============================================================
-    # EXACT COPY PLAYBOOK SNIPPET (AS PROVIDED BY USER)
+    # EXACT COPY PLAYBOOK SNIPPET (AS PROVIDED BY USER) - UNCHANGED
     # ============================================================
     - name: Set the destination path dynamically
       set_fact:
@@ -49,7 +49,7 @@
       when: copy_res.changed
 
     # ============================================================
-    # PATCH INSTALLATION & REBOOT LOGIC
+    # PATCH INSTALLATION & REBOOT LOGIC (FIXED)
     # ============================================================
     - name: 1. Initialize reporting variables
       set_fact:
@@ -68,7 +68,6 @@
             - copy_res.changed
             - dest_path | lower | regex_search('\.msu$')
           failed_when: install_result.rc != 0 and install_result.rc != 3010
-          # RC 3010 = SUCCESS_REBOOT_REQUIRED
 
         - name: Install .exe patch (generic silent install)
           win_command: >
@@ -93,20 +92,28 @@
             patch_status: "Success (1 patch installed)"
           when: install_result.rc is defined and (install_result.rc == 0 or install_result.rc == 3010)
 
-        - name: Check if reboot is required post-install
-          win_reboot_required:
+        # ✅ FIXED: Check for pending reboot via PowerShell registry check
+        - name: Check if reboot is required post-install (via registry)
+          win_shell: |
+            $rebootPending = $false
+            # Check common pending reboot registry keys
+            if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") { $rebootPending = $true }
+            if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") { $rebootPending = $true }
+            if (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" -Name PendingFileRenameOperations -ErrorAction SilentlyContinue) { $rebootPending = $true }
+            if ($rebootPending) { exit 3010 } else { exit 0 }
           register: reboot_check
+          changed_when: false
+          failed_when: false
           when: install_result.rc is defined
 
-        - name: Reboot if required
+        - name: Reboot if installer returned 3010 OR registry check indicates pending reboot
           win_reboot:
             reboot_timeout: 600
             pre_reboot_delay: 10
             post_reboot_delay: 30
           register: reboot_result
           when: 
-            - reboot_check.reboot_required | default(false)
-            - install_result.rc == 3010
+            - install_result.rc == 3010 or reboot_check.rc == 3010
           
         - name: Update reboot status
           set_fact:
@@ -127,7 +134,7 @@
       ignore_errors: yes
 
     # ============================================================
-    # EXACT REPORT GENERATION & SMTP SECTION (ADAPTED)
+    # EXACT REPORT GENERATION & SMTP SECTION (PRESERVED)
     # ============================================================
 
     - name: 3. Create CSV Header
