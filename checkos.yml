@@ -5,11 +5,14 @@
 
   tasks:
 
-    - name: Display Windows Server Version Details
+    - name: Get exact Windows version info
+      win_shell: |
+        $os = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+        Write-Output "Product Name: $($os.ProductName)"
+        Write-Output "Current Build: $($os.CurrentBuild)"
+        Write-Output "UBR: $($os.UBR)"
+      register: win_version
+
+    - name: Display Version Information
       debug:
-        msg:
-          - "Server: {{ inventory_hostname }}"
-          - "Hostname: {{ ansible_hostname }}"
-          - "OS Name: {{ ansible_distribution }}"
-          - "OS Version: {{ ansible_distribution_version }}"
-          - "Build Number: {{ ansible_os_build }}"
+        var: win_version.stdout_lines
