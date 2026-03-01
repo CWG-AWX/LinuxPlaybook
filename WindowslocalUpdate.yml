@@ -1,82 +1,134 @@
 ---
-- name: Offline Windows Patch Deployment with Audit Report
+- name: Windows Multi-Host Security Patching & Audit Reporting (File-Based Patch)
   hosts: all
-  gather_facts: yes
-
+  gather_facts: yes  # Required to find the User Profile path
+  
   vars:
-    src_patch: "/mnt/updates/windows/windows10.0-kb5075906-x64.msu"
+    # --- PATCH FILE CONFIG ---
+    # Path inside the AWX Pod (linked to your host)
+    # UPDATE THIS: Change to your actual patch filename (.msu/.exe/.msi)
+    src_patch: "/mnt/updates/windows/windows10.0-kb5075906-x64_96e7590a40fbfde94dd84e3ed743ccd735f54654.msu"
+    
+    # --- REPORTING & SMTP CONFIG (Exact from your playbook) ---
     report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
     email_recipient: "abdullateef.adekogbe@cwg-plc.com"
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
+    # password should be provided via vault: vault_smtp_password
 
   tasks:
-
-    # ---------------- INITIALIZE REPORT VARIABLES ----------------
-
-    - name: 1. Initialize reporting variables
+    # ============================================================
+    # EXACT COPY PLAYBOOK SNIPPET (AS PROVIDED BY USER)
+    # ============================================================
+    - name: Set the destination path dynamically
       set_fact:
-        patch_status: "Not Installed"
-        reboot_status: "No reboot performed"
-        reporting_ip: "{{ ansible_host | default(inventory_hostname) }}"
-        full_os_name: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+        # This points to C:\Users\<Current_User>\Downloads
+        dest_path: "{{ ansible_env.USERPROFILE }}\\Downloads\\windows10.0-kb5075906-x64_96e7590a40fbfde94dd84e3ed743ccd735f54654.msu"
 
-    # ---------------- VERIFY PATCH EXISTS ON AWX ----------------
-
-    - name: Ensure patch exists on AWX side
+    - name: Ensure the test file exists on the AWX side
       delegate_to: localhost
       stat:
         path: "{{ src_patch }}"
       register: local_file
 
-    - name: Fail if patch is not visible
+    - name: Fail if the mount is not working
       fail:
         msg: "The path {{ src_patch }} is not visible. Check your Pod Spec Override."
       when: not local_file.stat.exists
 
-    # ---------------- COPY + INSTALL PATCH ----------------
-
-    - name: Create patch directory on Windows
-      win_file:
-        path: C:\Temp\Patch
-        state: directory
-
-    - name: Set destination path
-      set_fact:
-        dest_path: "C:\\Temp\\Patch\\windows10.0-kb5075906-x64.msu"
-
-    - name: Copy patch to Windows server
+    - name: Copy file from Host Mount to Windows Downloads
       win_copy:
         src: "{{ src_patch }}"
         dest: "{{ dest_path }}"
       register: copy_res
 
-    - name: Install Windows patch (.msu)
-      win_hotfix:
-        source: "{{ dest_path }}"
-        state: present
-      register: install_result
+    - name: Show the result
+      debug:
+        msg: "File successfully copied to {{ dest_path }}"
+      when: copy_res.changed
 
-    - name: Record Installation Results
+    # ============================================================
+    # PATCH INSTALLATION & REBOOT LOGIC
+    # ============================================================
+    - name: 1. Initialize reporting variables
       set_fact:
-        patch_status: "{{ 'Success' if install_result.changed else 'Already Installed' }}"
-        reboot_status: "{{ 'Reboot Required' if install_result.reboot_required else 'No reboot needed' }}"
+        patch_status: "No action taken"
+        reboot_status: "No reboot performed"
+        reporting_ip: "{{ ansible_host | default(inventory_hostname) }}"
+        full_os_name: "{{ ansible_distribution | default('Windows') }} {{ ansible_distribution_version | default(ansible_os_version) }}"
 
-    - name: Reboot if required
-      win_reboot:
-        msg: "Rebooting after patch installation"
-        reboot_timeout: 3600
-      when: install_result.reboot_required
+    - name: 2. Install the Windows Patch File
+      block:
+        - name: Install .msu patch (Windows Update Standalone Installer)
+          win_command: >
+            wusa.exe "{{ dest_path }}" /quiet /norestart
+          register: install_result
+          when: 
+            - copy_res.changed
+            - dest_path | lower | regex_search('\.msu$')
+          failed_when: install_result.rc != 0 and install_result.rc != 3010
+          # RC 3010 = SUCCESS_REBOOT_REQUIRED
 
-    - name: Handle Installation Failure
-      rescue:
-        - name: Set failure state
+        - name: Install .exe patch (generic silent install)
+          win_command: >
+            "{{ dest_path }}" /S /quiet /norestart
+          register: install_result
+          when:
+            - copy_res.changed
+            - dest_path | lower | regex_search('\.exe$')
+          failed_when: install_result.rc != 0 and install_result.rc != 3010
+
+        - name: Install .msi patch (Windows Installer)
+          win_command: >
+            msiexec /i "{{ dest_path }}" /quiet /norestart
+          register: install_result
+          when:
+            - copy_res.changed
+            - dest_path | lower | regex_search('\.msi$')
+          failed_when: install_result.rc != 0 and install_result.rc != 3010
+
+        - name: Record successful installation
           set_fact:
-            patch_status: "Failed"
-            reboot_status: "Error during installation"
+            patch_status: "Success (1 patch installed)"
+          when: install_result.rc is defined and (install_result.rc == 0 or install_result.rc == 3010)
 
-    # ---------------- REPORT GENERATION ----------------
+        - name: Check if reboot is required post-install
+          win_reboot_required:
+          register: reboot_check
+          when: install_result.rc is defined
+
+        - name: Reboot if required
+          win_reboot:
+            reboot_timeout: 600
+            pre_reboot_delay: 10
+            post_reboot_delay: 30
+          register: reboot_result
+          when: 
+            - reboot_check.reboot_required | default(false)
+            - install_result.rc == 3010
+          
+        - name: Update reboot status
+          set_fact:
+            reboot_status: "Reboot Completed"
+          when: reboot_result is defined and reboot_result.rebooted | default(false)
+
+      rescue:
+        - name: Handle installation failures
+          set_fact:
+            patch_status: "Failed: {{ ansible_failed_result.msg | default('Unknown error') }}"
+            reboot_status: "Error - installation failed"
+
+    - name: Cleanup Patch Installer (optional)
+      win_file:
+        path: "{{ dest_path }}"
+        state: absent
+      when: copy_res.changed and patch_status | regex_search('Success')
+      ignore_errors: yes
+
+    # ============================================================
+    # EXACT REPORT GENERATION & SMTP SECTION (ADAPTED)
+    # ============================================================
 
     - name: 3. Create CSV Header
       run_once: true
@@ -85,6 +137,7 @@
       copy:
         dest: "{{ report_file }}"
         content: "Hostname,IP_Address,OS_Version,Patch_Status,Reboot_Action,Timestamp\n"
+      ignore_errors: yes
 
     - name: 4. Append host data to CSV
       delegate_to: localhost
@@ -106,7 +159,8 @@
         password: "{{ vault_smtp_password }}"
         secure: starttls
         to: "{{ email_recipient }}"
-        subject: "PROD WINDOWS OFFLINE PATCH REPORT"
-        body: "Hi Team, Kindly note that offline Windows patch deployment is complete. See attached csv file for patch report."
+        subject: "PROD WINDOWS AUDIT: Patching Report Complete"
+        body: "Hi Team, Kindly note that Windows patching cycle is complete. See attached csv file for patch report."
         attach: "{{ report_file }}"
       when: report_file is exists
+      ignore_errors: yes
