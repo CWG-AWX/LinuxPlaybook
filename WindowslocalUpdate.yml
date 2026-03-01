@@ -97,6 +97,10 @@
         - name: Install .msu patch via wusa.exe
           win_command: >
             wusa.exe "{{ dest_path }}" /quiet /norestart
+          become: yes
+          become_method: runas
+          become_user: "{{ ansible_user }}"
+          register: install_result
           register: install_result
           when: 
             - copy_res.changed
