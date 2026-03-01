@@ -1,0 +1,35 @@
+---
+- name: Copy file to Windows Downloads folder
+  hosts: your_windows_server
+  gather_facts: yes  # Required to find the User Profile path
+  vars:
+    # Path inside the AWX Pod (linked to your host)
+    src_patch: "/mnt/updates/test_mount.txt"
+
+  tasks:
+    - name: Set the destination path dynamically
+      set_fact:
+        # This points to C:\Users\<Current_User>\Downloads
+        dest_path: "{{ ansible_env.USERPROFILE }}\\Downloads\\test_mount.txt"
+
+    - name: Ensure the test file exists on the AWX side
+      delegate_to: localhost
+      stat:
+        path: "{{ src_patch }}"
+      register: local_file
+
+    - name: Fail if the mount is not working
+      fail:
+        msg: "The path {{ src_patch }} is not visible. Check your Pod Spec Override."
+      when: not local_file.stat.exists
+
+    - name: Copy file from Host Mount to Windows Downloads
+      win_copy:
+        src: "{{ src_patch }}"
+        dest: "{{ dest_path }}"
+      register: copy_res
+
+    - name: Show the result
+      debug:
+        msg: "File successfully copied to {{ dest_path }}"
+      when: copy_res.changed
