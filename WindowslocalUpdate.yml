@@ -99,7 +99,7 @@
             wusa.exe "{{ dest_path }}" /quiet /norestart
           become: yes
           become_method: runas
-          become_user: "{{ ansible_user }}"
+          become_user: ansible_svc
           register: install_result
           register: install_result
           when: 
