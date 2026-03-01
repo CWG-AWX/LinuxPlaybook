@@ -1,6 +1,6 @@
 ---
 - name: Copy file to Windows Downloads folder
-  hosts: your_windows_server
+  hosts: all
   gather_facts: yes  # Required to find the User Profile path
   vars:
     # Path inside the AWX Pod (linked to your host)
