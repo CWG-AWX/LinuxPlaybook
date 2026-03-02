@@ -17,22 +17,24 @@
     smtp_user: "ignioservices@gmail.com"
 
   tasks:
+
     # ============================================================
-    # PREPARATION & FILE COPY
+    # PREPARATION
     # ============================================================
-    - name: Set the destination path dynamically
+
+    - name: Set destination path
       set_fact:
         dest_path: "{{ remote_patch_path }}"
 
-    - name: Ensure the patch file exists on the AWX side
+    - name: Ensure patch file exists on AWX side
       delegate_to: localhost
       stat:
         path: "{{ src_patch }}"
       register: local_file
 
-    - name: Fail if the mount is not working
+    - name: Fail if mount not visible
       fail:
-        msg: "The path {{ src_patch }} is not visible. Check your Pod Spec Override."
+        msg: "The path {{ src_patch }} is not visible. Check Pod Spec Override."
       when: not local_file.stat.exists
 
     - name: Ensure remote temp directory exists
@@ -40,167 +42,185 @@
         path: "{{ remote_temp_dir }}"
         state: directory
 
-    - name: Copy patch file to Windows Temp folder
+    - name: Copy patch to Windows server
       win_copy:
         src: "{{ src_patch }}"
         dest: "{{ dest_path }}"
       register: copy_res
 
+
     # ============================================================
-    # PATCH INSTALLATION LOGIC
+    # INITIALIZE VARIABLES
     # ============================================================
-    - name: 1. Initialize reporting variables
+
+    - name: Initialize reporting variables
       set_fact:
         patch_status: "No action taken"
         reboot_status: "No reboot performed"
         reporting_ip: "{{ ansible_host | default(inventory_hostname) }}"
         full_os_name: "{{ ansible_distribution | default('Windows') }} {{ ansible_distribution_version | default(ansible_os_version) }}"
         kb_number: ""
+        previous_kb: "N/A"
+        previous_kb_date: "N/A"
+        new_kb_installed_on: "N/A"
 
-    - name: Extract KB number from filename (for pre-check)
+
+    # ============================================================
+    # CAPTURE PREVIOUS UPDATE
+    # ============================================================
+
+    - name: Get last installed Windows update
+      win_shell: |
+        $last = Get-HotFix |
+                Sort-Object InstalledOn -Descending |
+                Select-Object -First 1
+        if ($last) {
+            "$($last.HotFixID)|$($last.InstalledOn)"
+        }
+      register: previous_patch_info
+      changed_when: false
+      failed_when: false
+
+    - name: Parse previous patch details
+      set_fact:
+        previous_kb: "{{ previous_patch_info.stdout.split('|')[0] | default('N/A') }}"
+        previous_kb_date: "{{ previous_patch_info.stdout.split('|')[1] | default('N/A') }}"
+      when: previous_patch_info.stdout is defined and previous_patch_info.stdout != ""
+
+
+    # ============================================================
+    # EXTRACT KB NUMBER
+    # ============================================================
+
+    - name: Extract KB number from filename
       set_fact:
         kb_number: "{{ dest_path | regex_search('kb[0-9]+', ignorecase=True) | default('') | lower }}"
       when: copy_res.changed
 
-    - name: 2. Install the Windows Patch File
+
+    # ============================================================
+    # INSTALL PATCH
+    # ============================================================
+
+    - name: Install Patch Block
       block:
-        - name: Check if KB is already installed via Get-HotFix
-          win_shell: |
-            $kb = "{{ kb_number }}"
-            if ($kb -and (Get-HotFix -Id $kb -ErrorAction SilentlyContinue)) {
-                Write-Output "ALREADY_INSTALLED"
-                exit 0
-            } else {
-                exit 1
-            }
-          register: hotfix_check
-          changed_when: false
-          failed_when: false
-          when: kb_number != ""
 
-        - name: Skip install if KB already present
-          set_fact:
-            patch_status: "Success (patch already installed)"
-          when: 
-            - kb_number != ""
-            - hotfix_check.stdout is defined
-            - "'ALREADY_INSTALLED' in hotfix_check.stdout"
-
-        # FIXED: Added become and become_method to prevent RC 5
-        - name: Install .msu patch via wusa.exe
+        - name: Install .msu patch
           win_command: >
             wusa.exe "{{ dest_path }}" /quiet /norestart
           become: yes
           become_method: runas
           become_user: ansible_svc
           register: install_result
-          when: 
-            - copy_res.changed
-            - dest_path | lower | regex_search('\.msu$')
-            - patch_status != "Success (patch already installed)"
+          when: copy_res.changed
           failed_when: >
             install_result.rc is defined and
-            install_result.rc != 0 and 
-            install_result.rc not in [0, 3010, 17021]
+            install_result.rc not in [0, 3010, 17021, 2359302]
 
-        - name: Record successful installation
+        - name: Interpret wusa return code
           set_fact:
-            patch_status: "Success (1 patch installed)"
-          when: 
-            - install_result.rc is defined
-            - install_result.rc in [0, 3010, 17021]
+            patch_status: >-
+              {% if install_result.rc == 0 %}
+                Success (1 patch installed)
+              {% elif install_result.rc == 3010 %}
+                Success (Installed - Reboot Required)
+              {% elif install_result.rc == 2359302 %}
+                No Update Required (Already Installed)
+              {% elif install_result.rc == 17021 %}
+                No Update Required (Not Applicable)
+              {% else %}
+                Failed (RC {{ install_result.rc }})
+              {% endif %}
+          when: install_result.rc is defined
 
-        - name: Check if reboot is required post-install (via registry)
-          win_shell: |
-            $rebootPending = $false
-            if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") { $rebootPending = $true }
-            if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") { $rebootPending = $true }
-            if (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" -Name PendingFileRenameOperations -ErrorAction SilentlyContinue) { $rebootPending = $true }
-            if ($rebootPending) { exit 3010 } else { exit 0 }
-          register: reboot_check
-          changed_when: false
-          failed_when: false
-          when: install_result.rc is defined and install_result.rc in [0, 3010]
-
-        # FIXED: Added default(0) to handle skipped tasks without crashing
         - name: Reboot if required
           win_reboot:
             reboot_timeout: 600
-            pre_reboot_delay: 10
-            post_reboot_delay: 30
           register: reboot_result
-          when: >
-            (install_result.rc | default(0)) == 3010 or 
-            (reboot_check.rc | default(0)) == 3010
-          
+          when: install_result.rc | default(0) == 3010
+
         - name: Update reboot status
           set_fact:
             reboot_status: "Reboot Completed"
           when: reboot_result is defined and reboot_result.rebooted | default(false)
 
       rescue:
-        - name: Handle installation failures with detailed diagnostics
-          block:
-            - name: Gather diagnostic info on failure
-              win_shell: |
-                $info = @{}
-                $info.User = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-                $info.IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-                $info | ConvertTo-Json
-              register: diag_info
-              changed_when: false
-              failed_when: false
 
-            - name: Set detailed failure message
-              set_fact:
-                patch_status: "Failed (RC {{ install_result.rc | default('N/A') }}): {{ 
-                  'Access Denied - check elevation' if (install_result.rc | default(0)) == 5 else
-                  'Patch not applicable' if (install_result.rc | default(0)) == 87 else
-                  'Unknown error'
-                }}"
-                reboot_status: "Error - installation failed"
+        - name: Set failure message
+          set_fact:
+            patch_status: "Failed (RC {{ install_result.rc | default('N/A') }})"
+            reboot_status: "Error - installation failed"
 
-    - name: Cleanup Patch Installer
+
+    # ============================================================
+    # CAPTURE NEW PATCH DETAILS
+    # ============================================================
+
+    - name: Get details of newly installed patch
+      win_shell: |
+        $kb = "{{ kb_number }}"
+        if ($kb) {
+            $patch = Get-HotFix -Id $kb -ErrorAction SilentlyContinue
+            if ($patch) {
+                "$($patch.HotFixID)|$($patch.InstalledOn)"
+            }
+        }
+      register: new_patch_info
+      changed_when: false
+      failed_when: false
+      when: kb_number != ""
+
+    - name: Parse new patch details
+      set_fact:
+        new_kb_installed_on: "{{ new_patch_info.stdout.split('|')[1] | default('N/A') }}"
+      when: new_patch_info.stdout is defined and new_patch_info.stdout != ""
+
+
+    # ============================================================
+    # CLEANUP
+    # ============================================================
+
+    - name: Cleanup patch file
       win_file:
         path: "{{ dest_path }}"
         state: absent
       when: copy_res.changed
       ignore_errors: yes
 
+
     # ============================================================
-    # REPORT GENERATION & SMTP
+    # REPORT GENERATION (QUOTED CSV)
     # ============================================================
-    - name: 3. Create CSV Header
+
+    - name: Create CSV Header
       run_once: true
       delegate_to: localhost
-      become: no
       copy:
         dest: "{{ report_file }}"
-        content: "Hostname,IP_Address,OS_Version,Patch_Status,Reboot_Action,Timestamp\n"
-      ignore_errors: yes
+        content: "\"Hostname\",\"IP_Address\",\"OS_Version\",\"Previous_KB\",\"Previous_KB_Date\",\"New_KB\",\"New_KB_Installed_On\",\"Patch_Status\",\"Reboot_Action\",\"Timestamp\"\n"
 
-    - name: 4. Append host data to CSV
+    - name: Append host data to CSV
       delegate_to: localhost
-      become: no
       throttle: 1
       lineinfile:
         path: "{{ report_file }}"
-        line: "{{ inventory_hostname }},{{ reporting_ip }},{{ full_os_name }},{{ patch_status }},{{ reboot_status }},{{ lookup('pipe','date --iso-8601=seconds') }}"
-      ignore_errors: yes
+        line: "\"{{ inventory_hostname }}\",\"{{ reporting_ip }}\",\"{{ full_os_name }}\",\"{{ previous_kb }}\",\"{{ previous_kb_date }}\",\"{{ kb_number | upper }}\",\"{{ new_kb_installed_on }}\",\"{{ patch_status | trim }}\",\"{{ reboot_status }}\",\"{{ lookup('pipe','date --iso-8601=seconds') }}\""
 
-    # FIXED: Replaced invalid "is exists" syntax with a proper stat check
-    - name: Check if report file was successfully created
+
+    # ============================================================
+    # EMAIL REPORT
+    # ============================================================
+
+    - name: Check if report exists
       run_once: true
       delegate_to: localhost
       stat:
         path: "{{ report_file }}"
       register: final_report_stat
-      ignore_errors: yes
 
-    - name: 5. Email Final Report
+    - name: Email Final Report
       run_once: true
       delegate_to: localhost
-      become: no
       community.general.mail:
         host: "{{ smtp_server }}"
         port: "{{ smtp_port }}"
@@ -209,7 +229,6 @@
         secure: starttls
         to: "{{ email_recipient }}"
         subject: "PROD WINDOWS AUDIT: Patching Report Complete"
-        body: "Hi Team,\n\nKindly note that the Windows patching cycle is complete. See the attached CSV file for the patch report."
+        body: "Windows patching cycle complete. See attached report."
         attach: "{{ report_file }}"
       when: final_report_stat.stat.exists | default(false)
-      ignore_errors: yes
