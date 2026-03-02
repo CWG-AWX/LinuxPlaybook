@@ -19,7 +19,7 @@
   tasks:
 
     # ============================================================
-    # PREPARATION & FILE COPY
+    # PREPARATION
     # ============================================================
 
     - name: Set destination path
@@ -50,7 +50,7 @@
 
 
     # ============================================================
-    # INITIALIZE REPORTING VARIABLES
+    # INITIALIZE VARIABLES
     # ============================================================
 
     - name: Initialize reporting variables
@@ -66,7 +66,7 @@
 
 
     # ============================================================
-    # CAPTURE PREVIOUS INSTALLED PATCH
+    # CAPTURE PREVIOUS UPDATE
     # ============================================================
 
     - name: Get last installed Windows update
@@ -105,28 +105,6 @@
     - name: Install Patch Block
       block:
 
-        - name: Check if KB already installed
-          win_shell: |
-            $kb = "{{ kb_number }}"
-            if ($kb -and (Get-HotFix -Id $kb -ErrorAction SilentlyContinue)) {
-                Write-Output "ALREADY_INSTALLED"
-                exit 0
-            } else {
-                exit 1
-            }
-          register: hotfix_check
-          changed_when: false
-          failed_when: false
-          when: kb_number != ""
-
-        - name: Skip install if already present
-          set_fact:
-            patch_status: "Success (patch already installed)"
-          when:
-            - kb_number != ""
-            - hotfix_check.stdout is defined
-            - "'ALREADY_INSTALLED' in hotfix_check.stdout"
-
         - name: Install .msu patch
           win_command: >
             wusa.exe "{{ dest_path }}" /quiet /norestart
@@ -134,20 +112,26 @@
           become_method: runas
           become_user: ansible_svc
           register: install_result
-          when:
-            - copy_res.changed
-            - patch_status != "Success (patch already installed)"
+          when: copy_res.changed
           failed_when: >
             install_result.rc is defined and
-            install_result.rc != 0 and
-            install_result.rc not in [0, 3010, 17021]
+            install_result.rc not in [0, 3010, 17021, 2359302]
 
-        - name: Record successful installation
+        - name: Interpret wusa return code
           set_fact:
-            patch_status: "Success (1 patch installed)"
-          when:
-            - install_result.rc is defined
-            - install_result.rc in [0, 3010, 17021]
+            patch_status: >-
+              {% if install_result.rc == 0 %}
+                Success (1 patch installed)
+              {% elif install_result.rc == 3010 %}
+                Success (Installed - Reboot Required)
+              {% elif install_result.rc == 2359302 %}
+                No Update Required (Already Installed)
+              {% elif install_result.rc == 17021 %}
+                No Update Required (Not Applicable)
+              {% else %}
+                Failed (RC {{ install_result.rc }})
+              {% endif %}
+          when: install_result.rc is defined
 
         - name: Reboot if required
           win_reboot:
@@ -205,22 +189,22 @@
 
 
     # ============================================================
-    # REPORT GENERATION (FIXED CSV FORMAT)
+    # REPORT GENERATION (QUOTED CSV)
     # ============================================================
 
-    - name: Create CSV Header (Quoted)
+    - name: Create CSV Header
       run_once: true
       delegate_to: localhost
       copy:
         dest: "{{ report_file }}"
         content: "\"Hostname\",\"IP_Address\",\"OS_Version\",\"Previous_KB\",\"Previous_KB_Date\",\"New_KB\",\"New_KB_Installed_On\",\"Patch_Status\",\"Reboot_Action\",\"Timestamp\"\n"
 
-    - name: Append host data to CSV (Quoted)
+    - name: Append host data to CSV
       delegate_to: localhost
       throttle: 1
       lineinfile:
         path: "{{ report_file }}"
-        line: "\"{{ inventory_hostname }}\",\"{{ reporting_ip }}\",\"{{ full_os_name }}\",\"{{ previous_kb }}\",\"{{ previous_kb_date }}\",\"{{ kb_number | upper }}\",\"{{ new_kb_installed_on }}\",\"{{ patch_status }}\",\"{{ reboot_status }}\",\"{{ lookup('pipe','date --iso-8601=seconds') }}\""
+        line: "\"{{ inventory_hostname }}\",\"{{ reporting_ip }}\",\"{{ full_os_name }}\",\"{{ previous_kb }}\",\"{{ previous_kb_date }}\",\"{{ kb_number | upper }}\",\"{{ new_kb_installed_on }}\",\"{{ patch_status | trim }}\",\"{{ reboot_status }}\",\"{{ lookup('pipe','date --iso-8601=seconds') }}\""
 
 
     # ============================================================
