@@ -1,5 +1,5 @@
 ---
-- name: Windows Multi-Host Security Patching (REST API + Nutanix Recovery)
+- name: Windows Multi-Host Security Patching (API-Driven Nutanix Recovery)
   hosts: all
   gather_facts: yes
   
@@ -9,10 +9,11 @@
     remote_temp_dir: "C:\\Windows\\Temp"
     remote_patch_path: "{{ remote_temp_dir }}\\patch_install.msu"
     
-    # --- NUTANIX CONFIG (Prism Central 10.20.24.5) ---
+    # --- NUTANIX CONFIG (Hard-coded Variables for AWX Compatibility) ---
     nutanix_host: "10.20.24.5" 
-    nutanix_user: "{{ lookup('env', 'NUTANIX_USERNAME') }}"
-    nutanix_pass: "{{ lookup('env', 'NUTANIX_PASSWORD') }}"
+    # RECOMMENDED: Define these in AWX Extra Vars or a Vaulted Credential
+    nutanix_user: "{{ vault_nutanix_username | default('admin') }}" 
+    nutanix_pass: "{{ vault_nutanix_password }}"
     snap_name: "PrePatch_{{ inventory_hostname | replace('.', '_') }}_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}"
 
     # --- REPORTING & SMTP ---
@@ -24,9 +25,9 @@
 
   tasks:
     # ============================================================
-    # PRE-CHECK & NUTANIX INTROSPECTION
+    # PRE-CHECK & DATA GATHERING
     # ============================================================
-    - name: Extract KB ID from filename
+    - name: Extract KB ID
       set_fact:
         kb_id: "{{ (src_patch | regex_search('kb[0-9]+', ignorecase=True) | default('KB5075906')) }}"
 
@@ -52,21 +53,25 @@
       register: vm_details
       when: needs_patching
 
-    - name: Set VM UUID Fact
+    - name: Set VM UUID Fact (Robust Parsing)
       set_fact:
         ntnx_uuid: "{{ vm_details.response.entities[0].metadata.uuid }}"
-      when: needs_patching and vm_details.response.entities | length > 0
+      when: 
+        - needs_patching 
+        - vm_details.response is defined 
+        - (vm_details.response.entities | length > 0)
 
     # ============================================================
     # PHASE 1: PREPARATION & SNAPSHOT (Direct API Call)
     # ============================================================
+    
     - name: PHASE 1 Create Pre-Patch Snapshot via Nutanix REST API
       uri:
         url: "https://{{ nutanix_host }}:9440/api/nutanix/v3/vm_snapshots"
         method: POST
         user: "{{ nutanix_user }}"
         password: "{{ nutanix_pass }}"
-        force_basic_auth: yes
+        force_basic_auth: yes # Force authentication for every request
         validate_certs: false
         body_format: json
         body:
@@ -93,7 +98,7 @@
       when: needs_patching
 
     # ============================================================
-    # INITIALIZE REPORTING VARIABLES
+    # INITIALIZE REPORTING
     # ============================================================
     - name: Initialize reporting variables
       set_fact:
@@ -132,9 +137,7 @@
           win_shell: |
             $prePorts = "{{ pre_patch_ports.stdout_lines | join(',') }}".Split(',')
             $postPorts = Get-NetTCPConnection -State Listen | Select-Object -ExpandProperty LocalPort | Sort-Object -Unique
-            foreach ($port in $prePorts) {
-                if ($port -and ($port -notin $postPorts)) { exit 1 }
-            }
+            foreach ($port in $prePorts) { if ($port -and ($port -notin $postPorts)) { exit 1 } }
             exit 0
           register: validation_result
           retries: 5
@@ -172,7 +175,7 @@
             force_basic_auth: yes
             validate_certs: false
           delegate_to: localhost
-          when: api_snap_info.json is defined
+          when: api_snap_info.json.metadata.uuid is defined
 
         - name: "PHASE 4.3: Power On VM"
           nutanix.ncp.ntnx_vms:
@@ -184,28 +187,25 @@
             vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
           delegate_to: localhost
 
-        - name: "PHASE 4.4: Wait for WinRM Connection (Rollback Validation)"
+        - name: "PHASE 4.4: Wait for WinRM Connection"
           wait_for_connection:
             delay: 30
             timeout: 600
 
-        - name: Set failure facts for report
+        - name: Set failure facts
           set_fact:
             patch_status: "FAILED - ROLLED BACK"
-            recovery_action: "Automated Revert via Nutanix API triggered by port mismatch"
+            recovery_action: "Snapshot reverted via REST API due to validation failure"
 
     # ============================================================
-    # CLEANUP & AUDIT
+    # CLEANUP & REPORTING
     # ============================================================
-    - name: Cleanup patch file from server
+    - name: Cleanup patch file
       win_file:
         path: "{{ remote_patch_path }}"
         state: absent
       ignore_errors: yes
 
-    # ============================================================
-    # FINAL REPORT GENERATION & EMAIL
-    # ============================================================
     - name: Create CSV Header
       run_once: true
       delegate_to: localhost
