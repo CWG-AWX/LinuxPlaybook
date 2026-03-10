@@ -1,5 +1,5 @@
 ---
-- name: Windows Multi-Host Security Patching (Nutanix v3 API Schema Fix)
+- name: Windows Multi-Host Security Patching (API-Driven + Task Polling)
   hosts: all
   gather_facts: yes
   
@@ -9,13 +9,13 @@
     remote_temp_dir: "C:\\Windows\\Temp"
     remote_patch_path: "{{ remote_temp_dir }}\\patch_install.msu"
     
-    # --- NUTANIX CONFIG (Hardcoded for Testing) ---
+    # --- NUTANIX CONFIG ---
     nutanix_host: "10.20.24.5" 
     nutanix_user: "michael" 
     nutanix_pass: "Oba@2024"
     snap_name: "PrePatch_{{ inventory_hostname | replace('.', '_') }}_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}"
 
-    # --- REPORTING & SMTP ---
+    # --- REPORTING ---
     report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
     email_recipient: "blaizymike@gmail.com"
     smtp_server: "smtp.gmail.com"
@@ -60,10 +60,9 @@
         - (vm_details.response is defined and vm_details.response.entities | length > 0) or (vm_details.entities is defined and vm_details.entities | length > 0)
 
     # ============================================================
-    # PHASE 1: PREPARATION & SNAPSHOT (v3 API Schema Fix)
+    # PHASE 1: SNAPSHOT & TASK POLLING
     # ============================================================
-    
-    - name: PHASE 1 Create Pre-Patch Snapshot via Nutanix REST API
+    - name: PHASE 1.1 Create Pre-Patch Snapshot via Nutanix REST API
       uri:
         url: "https://{{ nutanix_host }}:9440/api/nutanix/v3/vm_snapshots"
         method: POST
@@ -71,22 +70,39 @@
         password: "{{ nutanix_pass }}"
         force_basic_auth: yes
         validate_certs: false
-        status_code: 202 # Nutanix usually returns 202 Accepted for tasks
+        status_code: [201, 202]
         body_format: json
         body:
           metadata:
             kind: "vm_snapshot"
           spec:
             name: "{{ snap_name }}"
-            resources:
-              entity_reference:
-                kind: "vm"
-                uuid: "{{ ntnx_uuid }}"
+            resources: {} 
+            entity_reference:
+              kind: "vm"
+              uuid: "{{ ntnx_uuid }}"
       delegate_to: localhost
       register: api_snap_info
       when: needs_patching and ntnx_uuid is defined
 
-    - name: "VALIDATION PREP: Capture Pre-Patch Listening Ports"
+    
+
+    - name: PHASE 1.2 Wait for Snapshot Task to Complete
+      uri:
+        url: "https://{{ nutanix_host }}:9440/api/nutanix/v3/tasks/{{ api_snap_info.json.status.execution_context.task_uuid }}"
+        method: GET
+        user: "{{ nutanix_user }}"
+        password: "{{ nutanix_pass }}"
+        force_basic_auth: yes
+        validate_certs: false
+      delegate_to: localhost
+      register: task_status
+      until: "task_status.json.status == 'SUCCEEDED'"
+      retries: 10
+      delay: 10
+      when: needs_patching and api_snap_info.json.status.execution_context.task_uuid is defined
+
+    - name: Capture Pre-Patch Listening Ports
       win_shell: |
         Get-NetTCPConnection -State Listen | Select-Object -ExpandProperty LocalPort | Sort-Object -Unique
       register: pre_patch_ports
@@ -110,11 +126,11 @@
         reporting_ip: "{{ ansible_host | default(inventory_hostname) }}"
 
     # ============================================================
-    # PHASE 2 & 3: INSTALLATION & VALIDATION
+    # PHASE 2 & 3: INSTALL & VALIDATE
     # ============================================================
     - name: Main Installation Block
       block:
-        - name: "PHASE 2: Install .msu patch"
+        - name: Install .msu patch
           win_command: "wusa.exe '{{ remote_patch_path }}' /quiet /norestart"
           async: 3600
           poll: 30
@@ -135,7 +151,7 @@
             reboot_status: "Reboot Completed"
           when: reboot_result is defined and (reboot_result.rebooted | default(false))
 
-        - name: "PHASE 3: Post-Patch Health Validation"
+        - name: Post-Patch Health Validation
           win_shell: |
             $prePorts = "{{ pre_patch_ports.stdout_lines | join(',') }}".Split(',')
             $postPorts = Get-NetTCPConnection -State Listen | Select-Object -ExpandProperty LocalPort | Sort-Object -Unique
@@ -154,10 +170,10 @@
           when: needs_patching
 
       # ============================================================
-      # PHASE 4: AUTOMATED ROLLBACK (RESCUE)
+      # PHASE 4: ROLLBACK (RESCUE)
       # ============================================================
       rescue:
-        - name: "PHASE 4.1: Power Off VM"
+        - name: Power Off VM
           nutanix.ncp.ntnx_vms:
             nutanix_host: "{{ nutanix_host }}"
             nutanix_username: "{{ nutanix_user }}"
@@ -168,7 +184,7 @@
           delegate_to: localhost
           ignore_errors: yes
 
-        - name: "PHASE 4.2: Restore via REST API"
+        - name: Restore via REST API
           uri:
             url: "https://{{ nutanix_host }}:9440/api/nutanix/v3/vm_snapshots/{{ api_snap_info.json.metadata.uuid }}/revert"
             method: POST
@@ -177,11 +193,11 @@
             force_basic_auth: yes
             validate_certs: false
             body_format: json
-            body: {} # Empty body required for revert POST
+            body: {} 
           delegate_to: localhost
-          when: api_snap_info.json is defined and api_snap_info.json.metadata is defined
+          when: api_snap_info.json is defined
 
-        - name: "PHASE 4.3: Power On VM"
+        - name: Power On VM
           nutanix.ncp.ntnx_vms:
             nutanix_host: "{{ nutanix_host }}"
             nutanix_username: "{{ nutanix_user }}"
@@ -191,7 +207,7 @@
             vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
           delegate_to: localhost
 
-        - name: "PHASE 4.4: Wait for WinRM Connection"
+        - name: Wait for WinRM Connection
           wait_for_connection:
             delay: 30
             timeout: 600
@@ -199,7 +215,7 @@
         - name: Set failure facts
           set_fact:
             patch_status: "FAILED - ROLLED BACK"
-            recovery_action: "Rollback successful via Nutanix Snapshot Revert API"
+            recovery_action: "Rollback completed via Nutanix API"
 
     # ============================================================
     # CLEANUP & REPORTING
