@@ -9,11 +9,10 @@
     remote_temp_dir: "C:\\Windows\\Temp"
     remote_patch_path: "{{ remote_temp_dir }}\\patch_install.msu"
     
-    # --- NUTANIX CONFIG (Hard-coded Variables for AWX Compatibility) ---
+    # --- NUTANIX CONFIG (Hardcoded for Testing) ---
     nutanix_host: "10.20.24.5" 
-    # RECOMMENDED: Define these in AWX Extra Vars or a Vaulted Credential
-    nutanix_user: "{{ vault_nutanix_username | default('admin') }}" 
-    nutanix_pass: "{{ vault_nutanix_password }}"
+    nutanix_user: "michael" 
+    nutanix_pass: "Oba@2024"
     snap_name: "PrePatch_{{ inventory_hostname | replace('.', '_') }}_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}"
 
     # --- REPORTING & SMTP ---
@@ -53,25 +52,23 @@
       register: vm_details
       when: needs_patching
 
-    - name: Set VM UUID Fact (Robust Parsing)
+    - name: Set VM UUID Fact
       set_fact:
-        ntnx_uuid: "{{ vm_details.response.entities[0].metadata.uuid }}"
+        ntnx_uuid: "{{ (vm_details.response.entities[0].metadata.uuid) if vm_details.response is defined else (vm_details.entities[0].metadata.uuid) }}"
       when: 
         - needs_patching 
-        - vm_details.response is defined 
-        - (vm_details.response.entities | length > 0)
+        - (vm_details.response is defined and vm_details.response.entities | length > 0) or (vm_details.entities is defined and vm_details.entities | length > 0)
 
     # ============================================================
     # PHASE 1: PREPARATION & SNAPSHOT (Direct API Call)
     # ============================================================
-    
     - name: PHASE 1 Create Pre-Patch Snapshot via Nutanix REST API
       uri:
         url: "https://{{ nutanix_host }}:9440/api/nutanix/v3/vm_snapshots"
         method: POST
         user: "{{ nutanix_user }}"
         password: "{{ nutanix_pass }}"
-        force_basic_auth: yes # Force authentication for every request
+        force_basic_auth: yes
         validate_certs: false
         body_format: json
         body:
@@ -175,7 +172,7 @@
             force_basic_auth: yes
             validate_certs: false
           delegate_to: localhost
-          when: api_snap_info.json.metadata.uuid is defined
+          when: api_snap_info.json is defined and api_snap_info.json.metadata is defined
 
         - name: "PHASE 4.3: Power On VM"
           nutanix.ncp.ntnx_vms:
@@ -227,9 +224,9 @@
         host: "{{ smtp_server }}"
         port: "{{ smtp_port }}"
         username: "{{ smtp_user }}"
-        password: "{{ vault_smtp_password }}"
+        password: "{{ vault_smtp_password | default('your_app_password') }}"
         secure: starttls
         to: "{{ email_recipient }}"
-        subject: "PROD WINDOWS PATCHING: {{ inventory_hostname }} Cycle Complete"
+        subject: "PROD WINDOWS PATCHING: Cycle Complete"
         body: "Windows patching workflow has finished. Attached is the final audit report."
         attach: "{{ report_file }}"
