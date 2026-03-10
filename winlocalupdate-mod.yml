@@ -17,7 +17,7 @@
 
     # --- REPORTING & SMTP CONFIG ---
     report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
-    email_recipient: "michael.obateru@cwg-plc.com"
+    email_recipient: "abdullateef.adekogbe@cwg-plc.com"
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
@@ -50,7 +50,7 @@
       when: copy_res.changed
 
     - name: "PHASE 1: Create Pre-Patch Snapshot on Nutanix"
-      nutanix.ncp.ntnx_vm_snapshots:
+      nutanix.ncp.ntnx_snapshots:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
         nutanix_password: "{{ nutanix_pass }}"
@@ -58,7 +58,6 @@
         state: present
         vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
         snapshot_name: "{{ snapshot_name }}"
-        description: "Pre-patch state fingerprinting Job {{ tower_job_id | default('Manual') }}"
       delegate_to: localhost
       when: copy_res.changed
       register: snapshot_info
@@ -127,7 +126,7 @@
       # ============================================================
       rescue:
         - name: "PHASE 4: Restore Nutanix Snapshot (Rollback)"
-          nutanix.ncp.ntnx_vm_snapshots:
+          nutanix.ncp.ntnx_snapshots:
             nutanix_host: "{{ nutanix_host }}"
             nutanix_username: "{{ nutanix_user }}"
             nutanix_password: "{{ nutanix_pass }}"
