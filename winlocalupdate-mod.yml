@@ -50,7 +50,7 @@
       when: copy_res.changed
 
     - name: "PHASE 1: Create Pre-Patch Snapshot on Nutanix"
-      nutanix.ncp.ntnx_snapshots:
+      nutanix.ncp.ntnx_vm_snapshots:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
         nutanix_password: "{{ nutanix_pass }}"
@@ -127,7 +127,7 @@
       # ============================================================
       rescue:
         - name: "PHASE 4: Restore Nutanix Snapshot (Rollback)"
-          nutanix.ncp.ntnx_snapshots:
+          nutanix.ncp.ntnx_vm_snapshots:
             nutanix_host: "{{ nutanix_host }}"
             nutanix_username: "{{ nutanix_user }}"
             nutanix_password: "{{ nutanix_pass }}"
