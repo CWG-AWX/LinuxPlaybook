@@ -1,5 +1,5 @@
 ---
-- name: Windows Multi-Host Security Patching (Dynamic Port Validation & Nutanix Recovery)
+- name: Windows Multi-Host Security Patching (KB-Aware Logic)
   hosts: all
   gather_facts: yes
   
@@ -9,14 +9,13 @@
     remote_temp_dir: "C:\\Windows\\Temp"
     remote_patch_path: "{{ remote_temp_dir }}\\patch_install.msu"
     
-    # --- NUTANIX CONFIG (10.20.24.5) ---
+    # --- NUTANIX CONFIG ---
     nutanix_host: "10.20.24.5" 
     nutanix_user: "{{ lookup('env', 'NUTANIX_USERNAME') }}"
     nutanix_pass: "{{ lookup('env', 'NUTANIX_PASSWORD') }}"
-    # Replacing dots with underscores for cleaner Nutanix API naming
     snap_name: "PrePatch_{{ inventory_hostname | replace('.', '_') }}_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}"
 
-    # --- REPORTING & SMTP CONFIG ---
+    # --- REPORTING ---
     report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
     email_recipient: "blaizymike@gmail.com"
     smtp_server: "smtp.gmail.com"
@@ -25,30 +24,31 @@
 
   tasks:
     # ============================================================
-    # PREPARATION & FINGERPRINTING
+    # PRE-CHECK: IS PATCH NEEDED?
     # ============================================================
-    - name: Set destination path
+    - name: Extract KB number for check
       set_fact:
-        dest_path: "{{ remote_patch_path }}"
+        kb_id: "{{ (src_patch | regex_search('kb[0-9]+', ignorecase=True) | default('KB5075906')) }}"
 
-    - name: Ensure patch file exists on AWX side
-      delegate_to: localhost
-      stat:
-        path: "{{ src_patch }}"
-      register: local_file
+    - name: Check if KB is already installed
+      win_shell: "Get-HotFix -Id {{ kb_id }} -ErrorAction SilentlyContinue"
+      register: kb_check
+      failed_when: false
+      changed_when: false
 
-    - name: Copy patch to Windows server
-      win_copy:
-        src: "{{ src_patch }}"
-        dest: "{{ dest_path }}"
-      register: copy_res
+    - name: Set patching requirement flag
+      set_fact:
+        needs_patching: "{{ kb_check.rc != 0 }}"
 
+    # ============================================================
+    # PREPARATION (Only if needs_patching)
+    # ============================================================
     - name: "VALIDATION PREP: Capture Pre-Patch Listening Ports"
       win_shell: |
         Get-NetTCPConnection -State Listen | Select-Object -ExpandProperty LocalPort | Sort-Object -Unique
       register: pre_patch_ports
       changed_when: false
-      when: copy_res.changed
+      when: needs_patching
 
     - name: PHASE 1 Create Pre-Patch Snapshot on Nutanix
       nutanix.ncp.ntnx_vms:
@@ -60,20 +60,24 @@
         vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
         snapshot_name: "{{ snap_name }}"
       delegate_to: localhost
-      when: copy_res.changed
       register: snapshot_info
+      when: needs_patching
+
+    - name: Copy patch to Windows server
+      win_copy:
+        src: "{{ src_patch }}"
+        dest: "{{ remote_patch_path }}"
+      when: needs_patching
 
     # ============================================================
-    # INITIALIZE VARIABLES
+    # INITIALIZE REPORTING
     # ============================================================
     - name: Initialize reporting variables
       set_fact:
-        patch_status: "No action taken"
+        patch_status: "{{ 'Success' if not needs_patching else 'Pending' }}"
         reboot_status: "No reboot performed"
         recovery_action: "None"
         reporting_ip: "{{ ansible_host | default(inventory_hostname) }}"
-        kb_number: "{{ (dest_path | regex_search('kb[0-9]+', ignorecase=True) | default('') | lower) }}"
-        new_kb_installed_on: "N/A"
 
     # ============================================================
     # PHASE 2: INSTALLATION BLOCK
@@ -81,11 +85,11 @@
     - name: Main Installation Block
       block:
         - name: "PHASE 2: Install .msu patch"
-          win_command: "wusa.exe '{{ dest_path }}' /quiet /norestart"
+          win_command: "wusa.exe '{{ remote_patch_path }}' /quiet /norestart"
           async: 3600
           poll: 30
           register: install_result
-          when: copy_res.changed
+          when: needs_patching
           failed_when: >
             install_result.rc is defined and
             install_result.rc not in [0, 3010, 17021, 2359302]
@@ -94,42 +98,33 @@
           win_reboot:
             reboot_timeout: 1200
           register: reboot_result
-          when: (install_result.rc | default(0)) == 3010
+          when: needs_patching and (install_result.rc | default(0)) == 3010
 
-        - name: Update reboot status
+        - name: Update status after install
           set_fact:
-            reboot_status: "Reboot Completed"
-          when: reboot_result is defined and (reboot_result.rebooted | default(false))
+            patch_status: "Success"
+            reboot_status: "{{ 'Reboot Completed' if (reboot_result.rebooted | default(false)) else 'No reboot required' }}"
+          when: needs_patching
 
-        - name: "PHASE 3: Post-Patch Health Validation (Port Comparison)"
+        - name: "PHASE 3: Post-Patch Health Validation"
           win_shell: |
             $prePorts = "{{ pre_patch_ports.stdout_lines | join(',') }}".Split(',')
             $postPorts = Get-NetTCPConnection -State Listen | Select-Object -ExpandProperty LocalPort | Sort-Object -Unique
-            foreach ($port in $prePorts) {
-                if ($port -and ($port -notin $postPorts)) { exit 1 }
-            }
+            foreach ($port in $prePorts) { if ($port -and ($port -notin $postPorts)) { exit 1 } }
             exit 0
           register: validation_result
           retries: 5
           delay: 45
           until: validation_result.rc == 0
-          when: copy_res.changed
+          when: needs_patching
           failed_when: validation_result.rc != 0
 
-        - name: Set success status
-          set_fact:
-            patch_status: "Success"
-
-      # ============================================================
-      # PHASE 4: AUTOMATED ROLLBACK (RESCUE)
-      # ============================================================
       rescue:
         - name: "PHASE 4.1: Power Off VM for Restore"
           nutanix.ncp.ntnx_vms:
             nutanix_host: "{{ nutanix_host }}"
             nutanix_username: "{{ nutanix_user }}"
             nutanix_password: "{{ nutanix_pass }}"
-            validate_certs: false
             state: "powered_off"
             vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
           delegate_to: localhost
@@ -140,63 +135,40 @@
             nutanix_host: "{{ nutanix_host }}"
             nutanix_username: "{{ nutanix_user }}"
             nutanix_password: "{{ nutanix_pass }}"
-            validate_certs: false
             state: restore
             vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
             snapshot_name: "{{ snap_name }}"
           delegate_to: localhost
-          when: snapshot_info is defined and (snapshot_info.changed | default(false))
+          when: snapshot_info.changed | default(false)
 
         - name: "PHASE 4.3: Power On VM after Restore"
           nutanix.ncp.ntnx_vms:
             nutanix_host: "{{ nutanix_host }}"
             nutanix_username: "{{ nutanix_user }}"
             nutanix_password: "{{ nutanix_pass }}"
-            validate_certs: false
             state: "powered_on"
             vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
           delegate_to: localhost
 
-        - name: "PHASE 4.4: Wait for WinRM Connection (Rollback Validation)"
+        - name: "PHASE 4.4: Wait for WinRM Connection"
           wait_for_connection:
             delay: 30
             timeout: 600
-          register: rollback_conn
 
-        - name: Set failure/recovery facts for report
+        - name: Set failure facts
           set_fact:
             patch_status: "FAILED - ROLLED BACK"
-            reboot_status: "Rollback Performed"
-            recovery_action: "VM Restored and WinRM reachable"
+            recovery_action: "VM Restored via Nutanix"
 
     # ============================================================
-    # CLEANUP & FINAL AUDIT
+    # CLEANUP & REPORTING
     # ============================================================
     - name: Cleanup patch file
       win_file:
-        path: "{{ dest_path }}"
+        path: "{{ remote_patch_path }}"
         state: absent
       ignore_errors: yes
 
-    - name: Get details of newly installed patch
-      win_shell: |
-        $kb = "{{ kb_number }}"
-        if ($kb) {
-            $patch = Get-HotFix -Id $kb -ErrorAction SilentlyContinue
-            if ($patch) { "$($patch.HotFixID)|$($patch.InstalledOn)" }
-        }
-      register: new_patch_info
-      changed_when: false
-      failed_when: false
-
-    - name: Parse new patch date
-      set_fact:
-        new_kb_installed_on: "{{ new_patch_info.stdout.split('|')[1] | default('N/A') }}"
-      when: new_patch_info.stdout is defined and new_patch_info.stdout != ""
-
-    # ============================================================
-    # REPORT GENERATION & EMAIL
-    # ============================================================
     - name: Create CSV Header
       run_once: true
       delegate_to: localhost
@@ -209,7 +181,7 @@
       throttle: 1
       lineinfile:
         path: "{{ report_file }}"
-        line: "\"{{ inventory_hostname }}\",\"{{ reporting_ip }}\",\"{{ patch_status | trim }}\",\"{{ reboot_status }}\",\"{{ recovery_action }}\",\"{{ lookup('pipe','date --iso-8601=seconds') }}\""
+        line: "\"{{ inventory_hostname }}\",\"{{ reporting_ip }}\",\"{{ patch_status }}\",\"{{ reboot_status }}\",\"{{ recovery_action }}\",\"{{ lookup('pipe','date --iso-8601=seconds') }}\""
 
     - name: Email Final Report
       run_once: true
@@ -222,5 +194,5 @@
         secure: starttls
         to: "{{ email_recipient }}"
         subject: "PROD WINDOWS AUDIT: Patching Report Complete"
-        body: "Windows patching cycle complete. Note: Check 'Recovery_Action' column for rollbacks."
+        body: "Windows patching cycle complete."
         attach: "{{ report_file }}"
