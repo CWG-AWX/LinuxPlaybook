@@ -13,7 +13,7 @@
     nutanix_host: "10.20.24.5" 
     nutanix_user: "{{ lookup('env', 'NUTANIX_USERNAME') }}"
     nutanix_pass: "{{ lookup('env', 'NUTANIX_PASSWORD') }}"
-    # Sanitizing: Replaces dots in IP/Hostname to avoid Nutanix API naming issues
+    # Replacing dots with underscores for cleaner Nutanix API naming
     snap_name: "PrePatch_{{ inventory_hostname | replace('.', '_') }}_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}"
 
     # --- REPORTING & SMTP CONFIG ---
@@ -51,12 +51,12 @@
       when: copy_res.changed
 
     - name: PHASE 1 Create Pre-Patch Snapshot on Nutanix
-      nutanix.ncp.ntnx_vms_snapshot:
+      nutanix.ncp.ntnx_vms:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
         nutanix_password: "{{ nutanix_pass }}"
         validate_certs: false
-        state: present
+        state: snapshot
         vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
         snapshot_name: "{{ snap_name }}"
       delegate_to: localhost
@@ -99,7 +99,7 @@
         - name: Update reboot status
           set_fact:
             reboot_status: "Reboot Completed"
-          when: reboot_result is defined and reboot_result.rebooted | default(false)
+          when: reboot_result is defined and (reboot_result.rebooted | default(false))
 
         - name: "PHASE 3: Post-Patch Health Validation (Port Comparison)"
           win_shell: |
@@ -124,8 +124,19 @@
       # PHASE 4: AUTOMATED ROLLBACK (RESCUE)
       # ============================================================
       rescue:
-        - name: PHASE 4 Restore Nutanix Snapshot (Rollback)
-          nutanix.ncp.ntnx_vms_snapshot:
+        - name: "PHASE 4.1: Power Off VM for Restore"
+          nutanix.ncp.ntnx_vms:
+            nutanix_host: "{{ nutanix_host }}"
+            nutanix_username: "{{ nutanix_user }}"
+            nutanix_password: "{{ nutanix_pass }}"
+            validate_certs: false
+            state: "powered_off"
+            vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
+          delegate_to: localhost
+          ignore_errors: yes
+
+        - name: "PHASE 4.2: Restore Nutanix Snapshot"
+          nutanix.ncp.ntnx_vms:
             nutanix_host: "{{ nutanix_host }}"
             nutanix_username: "{{ nutanix_user }}"
             nutanix_password: "{{ nutanix_pass }}"
@@ -134,13 +145,29 @@
             vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
             snapshot_name: "{{ snap_name }}"
           delegate_to: localhost
-          when: snapshot_info is defined and snapshot_info.changed
+          when: snapshot_info is defined and (snapshot_info.changed | default(false))
+
+        - name: "PHASE 4.3: Power On VM after Restore"
+          nutanix.ncp.ntnx_vms:
+            nutanix_host: "{{ nutanix_host }}"
+            nutanix_username: "{{ nutanix_user }}"
+            nutanix_password: "{{ nutanix_pass }}"
+            validate_certs: false
+            state: "powered_on"
+            vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
+          delegate_to: localhost
+
+        - name: "PHASE 4.4: Wait for WinRM Connection (Rollback Validation)"
+          wait_for_connection:
+            delay: 30
+            timeout: 600
+          register: rollback_conn
 
         - name: Set failure/recovery facts for report
           set_fact:
             patch_status: "FAILED - ROLLED BACK"
             reboot_status: "Rollback Performed"
-            recovery_action: "Nutanix Restore Completed due to Service Failure"
+            recovery_action: "VM Restored and WinRM reachable"
 
     # ============================================================
     # CLEANUP & FINAL AUDIT
@@ -195,5 +222,5 @@
         secure: starttls
         to: "{{ email_recipient }}"
         subject: "PROD WINDOWS AUDIT: Patching Report Complete"
-        body: "Windows patching cycle complete. Note: Check 'Recovery_Action' column for any automated Nutanix rollbacks."
+        body: "Windows patching cycle complete. Note: Check 'Recovery_Action' column for rollbacks."
         attach: "{{ report_file }}"
