@@ -1,5 +1,5 @@
 ---
-- name: Windows Multi-Host Security Patching (API-Driven Nutanix Recovery)
+- name: Windows Multi-Host Security Patching (Nutanix v3 API Schema Fix)
   hosts: all
   gather_facts: yes
   
@@ -40,7 +40,7 @@
       set_fact:
         needs_patching: "{{ kb_check.rc != 0 }}"
 
-    - name: Get VM UUID from Nutanix (Required for REST API)
+    - name: Get VM UUID from Nutanix
       nutanix.ncp.ntnx_vms_info:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
@@ -60,8 +60,9 @@
         - (vm_details.response is defined and vm_details.response.entities | length > 0) or (vm_details.entities is defined and vm_details.entities | length > 0)
 
     # ============================================================
-    # PHASE 1: PREPARATION & SNAPSHOT (Direct API Call)
+    # PHASE 1: PREPARATION & SNAPSHOT (v3 API Schema Fix)
     # ============================================================
+    
     - name: PHASE 1 Create Pre-Patch Snapshot via Nutanix REST API
       uri:
         url: "https://{{ nutanix_host }}:9440/api/nutanix/v3/vm_snapshots"
@@ -70,13 +71,17 @@
         password: "{{ nutanix_pass }}"
         force_basic_auth: yes
         validate_certs: false
+        status_code: 202 # Nutanix usually returns 202 Accepted for tasks
         body_format: json
         body:
-          snapshot_spec:
+          metadata:
+            kind: "vm_snapshot"
+          spec:
             name: "{{ snap_name }}"
-          entity_reference:
-            kind: "vm"
-            uuid: "{{ ntnx_uuid }}"
+            resources:
+              entity_reference:
+                kind: "vm"
+                uuid: "{{ ntnx_uuid }}"
       delegate_to: localhost
       register: api_snap_info
       when: needs_patching and ntnx_uuid is defined
@@ -152,7 +157,7 @@
       # PHASE 4: AUTOMATED ROLLBACK (RESCUE)
       # ============================================================
       rescue:
-        - name: "PHASE 4.1: Power Off VM (Supported State)"
+        - name: "PHASE 4.1: Power Off VM"
           nutanix.ncp.ntnx_vms:
             nutanix_host: "{{ nutanix_host }}"
             nutanix_username: "{{ nutanix_user }}"
@@ -171,6 +176,8 @@
             password: "{{ nutanix_pass }}"
             force_basic_auth: yes
             validate_certs: false
+            body_format: json
+            body: {} # Empty body required for revert POST
           delegate_to: localhost
           when: api_snap_info.json is defined and api_snap_info.json.metadata is defined
 
@@ -192,7 +199,7 @@
         - name: Set failure facts
           set_fact:
             patch_status: "FAILED - ROLLED BACK"
-            recovery_action: "Snapshot reverted via REST API due to validation failure"
+            recovery_action: "Rollback successful via Nutanix Snapshot Revert API"
 
     # ============================================================
     # CLEANUP & REPORTING
