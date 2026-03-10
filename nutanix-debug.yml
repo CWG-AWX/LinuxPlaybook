@@ -1,8 +1,12 @@
+---
 - hosts: localhost
+  gather_facts: false  # This prevents the setup module/sudo error
+  become: false        # We don't need root to list modules
   tasks:
     - name: List all available Nutanix modules
       shell: "ansible-doc -l | grep nutanix.ncp"
       register: modules_list
+      ignore_errors: true
 
     - debug:
         var: modules_list.stdout_lines
