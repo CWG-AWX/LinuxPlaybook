@@ -13,7 +13,8 @@
     nutanix_host: "10.20.24.5" 
     nutanix_user: "{{ lookup('env', 'NUTANIX_USERNAME') }}"
     nutanix_pass: "{{ lookup('env', 'NUTANIX_PASSWORD') }}"
-    snapshot_name: "PrePatch_{{ inventory_hostname }}_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}"
+    # Sanitizing: Replaces dots in IP/Hostname to avoid Nutanix API naming issues
+    snap_name: "PrePatch_{{ inventory_hostname | replace('.', '_') }}_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}"
 
     # --- REPORTING & SMTP CONFIG ---
     report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
@@ -49,15 +50,15 @@
       changed_when: false
       when: copy_res.changed
 
-    - name: "PHASE 1: Create Pre-Patch Recovery Point on Nutanix"
-      nutanix.ncp.ntnx_recovery_points:
+    - name: PHASE 1 Create Pre-Patch Snapshot on Nutanix
+      nutanix.ncp.ntnx_vms_snapshot:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
         nutanix_password: "{{ nutanix_pass }}"
         validate_certs: false
         state: present
         vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
-        recovery_point_name: "{{ snapshot_name }}"
+        snapshot_name: "{{ snap_name }}"
       delegate_to: localhost
       when: copy_res.changed
       register: snapshot_info
@@ -71,7 +72,6 @@
         reboot_status: "No reboot performed"
         recovery_action: "None"
         reporting_ip: "{{ ansible_host | default(inventory_hostname) }}"
-        full_os_name: "{{ ansible_distribution | default('Windows') }} {{ ansible_distribution_version | default(ansible_os_version) }}"
         kb_number: "{{ (dest_path | regex_search('kb[0-9]+', ignorecase=True) | default('') | lower) }}"
         new_kb_installed_on: "N/A"
 
@@ -82,9 +82,6 @@
       block:
         - name: "PHASE 2: Install .msu patch"
           win_command: "wusa.exe '{{ dest_path }}' /quiet /norestart"
-          become: yes
-          become_method: runas
-          become_user: ansible_svc
           async: 3600
           poll: 30
           register: install_result
@@ -108,8 +105,10 @@
           win_shell: |
             $prePorts = "{{ pre_patch_ports.stdout_lines | join(',') }}".Split(',')
             $postPorts = Get-NetTCPConnection -State Listen | Select-Object -ExpandProperty LocalPort | Sort-Object -Unique
-            $missingPorts = $prePorts | Where-Object { $_ -notin $postPorts }
-            if ($missingPorts) { exit 1 } else { exit 0 }
+            foreach ($port in $prePorts) {
+                if ($port -and ($port -notin $postPorts)) { exit 1 }
+            }
+            exit 0
           register: validation_result
           retries: 5
           delay: 45
@@ -125,14 +124,15 @@
       # PHASE 4: AUTOMATED ROLLBACK (RESCUE)
       # ============================================================
       rescue:
-        - name: "PHASE 4: Revert VM to Recovery Point (Rollback)"
-          nutanix.ncp.ntnx_vms_revert:
+        - name: PHASE 4 Restore Nutanix Snapshot (Rollback)
+          nutanix.ncp.ntnx_vms_snapshot:
             nutanix_host: "{{ nutanix_host }}"
             nutanix_username: "{{ nutanix_user }}"
             nutanix_password: "{{ nutanix_pass }}"
             validate_certs: false
+            state: restore
             vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
-            recovery_point_name: "{{ snapshot_name }}"
+            snapshot_name: "{{ snap_name }}"
           delegate_to: localhost
           when: snapshot_info is defined and snapshot_info.changed
 
@@ -140,7 +140,7 @@
           set_fact:
             patch_status: "FAILED - ROLLED BACK"
             reboot_status: "Rollback Performed"
-            recovery_action: "Nutanix Revert Completed due to Service Failure"
+            recovery_action: "Nutanix Restore Completed due to Service Failure"
 
     # ============================================================
     # CLEANUP & FINAL AUDIT
