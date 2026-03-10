@@ -17,7 +17,7 @@
 
     # --- REPORTING & SMTP CONFIG ---
     report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
-    email_recipient: "abdullateef.adekogbe@cwg-plc.com"
+    email_recipient: "blaizymike@gmail.com"
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
@@ -49,15 +49,15 @@
       changed_when: false
       when: copy_res.changed
 
-    - name: "PHASE 1: Create Pre-Patch Snapshot on Nutanix"
-      nutanix.ncp.ntnx_snapshots:
+    - name: "PHASE 1: Create Pre-Patch Recovery Point on Nutanix"
+      nutanix.ncp.ntnx_recovery_points:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
         nutanix_password: "{{ nutanix_pass }}"
         validate_certs: false
         state: present
         vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
-        snapshot_name: "{{ snapshot_name }}"
+        recovery_point_name: "{{ snapshot_name }}"
       delegate_to: localhost
       when: copy_res.changed
       register: snapshot_info
@@ -125,15 +125,14 @@
       # PHASE 4: AUTOMATED ROLLBACK (RESCUE)
       # ============================================================
       rescue:
-        - name: "PHASE 4: Restore Nutanix Snapshot (Rollback)"
-          nutanix.ncp.ntnx_snapshots:
+        - name: "PHASE 4: Revert VM to Recovery Point (Rollback)"
+          nutanix.ncp.ntnx_vms_revert:
             nutanix_host: "{{ nutanix_host }}"
             nutanix_username: "{{ nutanix_user }}"
             nutanix_password: "{{ nutanix_pass }}"
             validate_certs: false
-            state: restore
             vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
-            snapshot_name: "{{ snapshot_name }}"
+            recovery_point_name: "{{ snapshot_name }}"
           delegate_to: localhost
           when: snapshot_info is defined and snapshot_info.changed
 
@@ -141,7 +140,7 @@
           set_fact:
             patch_status: "FAILED - ROLLED BACK"
             reboot_status: "Rollback Performed"
-            recovery_action: "Nutanix Restore Completed due to Service Failure"
+            recovery_action: "Nutanix Revert Completed due to Service Failure"
 
     # ============================================================
     # CLEANUP & FINAL AUDIT
