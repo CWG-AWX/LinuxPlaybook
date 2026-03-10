@@ -1,85 +1,48 @@
 ---
-- name: Windows Multi-Host Security Patching & Audit Reporting (File-Based Patch)
+- name: Windows Multi-Host Security Patching & Audit Reporting (Nutanix v2.0 Integrated)
   hosts: all
   gather_facts: yes
   
   vars:
     # --- PATCH FILE CONFIG ---
     src_patch: "/mnt/updates/windows/windows10.0-kb5075906-x64_96e7590a40fbfde94dd84e3ed743ccd735f54654.msu"
-    remote_temp_dir: "C:\\Windows\\Temp"
-    remote_patch_path: "{{ remote_temp_dir }}\\patch_install.msu"
+    remote_patch_path: "C:/Windows/Temp/patch_install.msu"
     
-    # --- REPORTING & SMTP CONFIG ---
+    # --- NUTANIX CONFIG ---
+    nutanix_host: "10.20.24.5" 
+    nutanix_user: "michael" 
+    nutanix_pass: "Oba@2024"
+    snap_name: "PrePatch_{{ inventory_hostname | replace('.', '_') }}_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}"
+
+    # --- REPORTING & SMTP CONFIG (Updated from your snippet) ---
     report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
     email_recipient: "abdullateef.adekogbe@cwg-plc.com"
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
+    # Note: password is pulled from your vault_smtp_password variable in the mail task
 
   tasks:
-
     # ============================================================
-    # PREPARATION
+    # 1. AUDIT & PREPARATION
     # ============================================================
-
-    - name: Set destination path
-      set_fact:
-        dest_path: "{{ remote_patch_path }}"
-
-    - name: Ensure patch file exists on AWX side
-      delegate_to: localhost
-      stat:
-        path: "{{ src_patch }}"
-      register: local_file
-
-    - name: Fail if mount not visible
-      fail:
-        msg: "The path {{ src_patch }} is not visible. Check Pod Spec Override."
-      when: not local_file.stat.exists
-
-    - name: Ensure remote temp directory exists
-      win_file:
-        path: "{{ remote_temp_dir }}"
-        state: directory
-
-    - name: Copy patch to Windows server
-      win_copy:
-        src: "{{ src_patch }}"
-        dest: "{{ dest_path }}"
-      register: copy_res
-
-
-    # ============================================================
-    # INITIALIZE VARIABLES
-    # ============================================================
-
     - name: Initialize reporting variables
       set_fact:
         patch_status: "No action taken"
         reboot_status: "No reboot performed"
         reporting_ip: "{{ ansible_host | default(inventory_hostname) }}"
         full_os_name: "{{ ansible_distribution | default('Windows') }} {{ ansible_distribution_version | default(ansible_os_version) }}"
-        kb_number: ""
+        kb_number: "{{ src_patch | regex_search('kb[0-9]+', ignorecase=True) | default('KB5075906') | lower }}"
         previous_kb: "N/A"
         previous_kb_date: "N/A"
         new_kb_installed_on: "N/A"
 
-
-    # ============================================================
-    # CAPTURE PREVIOUS UPDATE
-    # ============================================================
-
-    - name: Get last installed Windows update
+    - name: Get last installed Windows update (Audit)
       win_shell: |
-        $last = Get-HotFix |
-                Sort-Object InstalledOn -Descending |
-                Select-Object -First 1
-        if ($last) {
-            "$($last.HotFixID)|$($last.InstalledOn)"
-        }
+        $last = Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 1
+        if ($last) { "$($last.HotFixID)|$($last.InstalledOn)" }
       register: previous_patch_info
       changed_when: false
-      failed_when: false
 
     - name: Parse previous patch details
       set_fact:
@@ -87,136 +50,161 @@
         previous_kb_date: "{{ previous_patch_info.stdout.split('|')[1] | default('N/A') }}"
       when: previous_patch_info.stdout is defined and previous_patch_info.stdout != ""
 
+    - name: Get Nutanix VM UUID
+      nutanix.ncp.ntnx_vms_info:
+        nutanix_host: "{{ nutanix_host }}"
+        nutanix_username: "{{ nutanix_user }}"
+        nutanix_password: "{{ nutanix_pass }}"
+        validate_certs: false
+        filter:
+          vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
+      delegate_to: localhost
+      register: vm_details
 
-    # ============================================================
-    # EXTRACT KB NUMBER
-    # ============================================================
-
-    - name: Extract KB number from filename
+    - name: Set VM UUID Fact
       set_fact:
-        kb_number: "{{ dest_path | regex_search('kb[0-9]+', ignorecase=True) | default('') | lower }}"
-      when: copy_res.changed
-
+        ntnx_uuid: "{{ (vm_details.response.entities[0].metadata.uuid) if vm_details.response is defined else (vm_details.entities[0].metadata.uuid) }}"
 
     # ============================================================
-    # INSTALL PATCH
+    # 2. NUTANIX SNAPSHOT (v2.0 API)
     # ============================================================
+    - name: Create Pre-Patch Snapshot
+      uri:
+        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots"
+        method: POST
+        user: "{{ nutanix_user }}"
+        password: "{{ nutanix_pass }}"
+        force_basic_auth: yes
+        validate_certs: false
+        body_format: json
+        body:
+          snapshot_specs:
+            - vm_uuid: "{{ ntnx_uuid }}"
+              snapshot_name: "{{ snap_name }}"
+      delegate_to: localhost
+      register: v2_snap_info
 
-    - name: Install Patch Block
+    - name: Wait for Snapshot Success
+      uri:
+        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/tasks/{{ v2_snap_info.json.task_uuid }}"
+        method: GET
+        user: "{{ nutanix_user }}"
+        password: "{{ nutanix_pass }}"
+        force_basic_auth: yes
+        validate_certs: false
+      delegate_to: localhost
+      register: v2_task_status
+      until: "v2_task_status.json.progress_status == 'Succeeded'"
+      retries: 15
+      delay: 10
+
+    # ============================================================
+    # 3. INSTALLATION & VALIDATION BLOCK
+    # ============================================================
+    
+    - name: Main Patching Logic
       block:
+        - name: Copy patch to Windows server
+          win_copy:
+            src: "{{ src_patch }}"
+            dest: "{{ remote_patch_path }}"
 
-        - name: Install .msu patch
-          win_command: >
-            wusa.exe "{{ dest_path }}" /quiet /norestart
+        - name: Install .msu patch (Using forward slashes to avoid Error 123)
+          win_command: wusa.exe {{ remote_patch_path }} /quiet /norestart
           become: yes
           become_method: runas
           become_user: ansible_svc
           register: install_result
-          when: copy_res.changed
-          failed_when: >
-            install_result.rc is defined and
-            install_result.rc not in [0, 3010, 17021, 2359302]
+          failed_when: "install_result.rc not in [0, 3010, 2359302, 17021]"
 
-        - name: Interpret wusa return code
+        - name: Interpret status
           set_fact:
             patch_status: >-
-              {% if install_result.rc == 0 %}
-                Success (1 patch installed)
-              {% elif install_result.rc == 3010 %}
-                Success (Installed - Reboot Required)
-              {% elif install_result.rc == 2359302 %}
-                No Update Required (Already Installed)
-              {% elif install_result.rc == 17021 %}
-                No Update Required (Not Applicable)
-              {% else %}
-                Failed (RC {{ install_result.rc }})
-              {% endif %}
-          when: install_result.rc is defined
+              {% if install_result.rc == 0 %}Success{% elif install_result.rc == 3010 %}Pending Reboot{% elif install_result.rc == 2359302 %}Already Installed{% else %}Not Applicable{% endif %}
 
         - name: Reboot if required
           win_reboot:
-            reboot_timeout: 600
+            reboot_timeout: 900
           register: reboot_result
-          when: install_result.rc | default(0) == 3010
+          when: install_result.rc == 3010
 
-        - name: Update reboot status
+        - name: Update reboot fact
           set_fact:
             reboot_status: "Reboot Completed"
           when: reboot_result is defined and reboot_result.rebooted | default(false)
 
-      rescue:
+        - name: Capture new patch date (Post-Audit)
+          win_shell: |
+            $patch = Get-HotFix -Id "{{ kb_number }}" -ErrorAction SilentlyContinue
+            if ($patch) { $patch.InstalledOn }
+          register: new_patch_check
+          changed_when: false
 
-        - name: Set failure message
+        - name: Set new KB date
           set_fact:
-            patch_status: "Failed (RC {{ install_result.rc | default('N/A') }})"
-            reboot_status: "Error - installation failed"
+            new_kb_installed_on: "{{ new_patch_check.stdout | default('N/A') }}"
 
+      # ============================================================
+      # 4. AUTOMATED ROLLBACK (RESCUE)
+      # ============================================================
+      rescue:
+        - name: Power Off VM
+          nutanix.ncp.ntnx_vms:
+            nutanix_host: "{{ nutanix_host }}"
+            nutanix_username: "{{ nutanix_user }}"
+            nutanix_password: "{{ nutanix_pass }}"
+            validate_certs: false
+            state: "power_off"
+            vm_uuid: "{{ ntnx_uuid }}"
+          delegate_to: localhost
+
+        - name: Restore Snapshot (v2.0 API)
+          uri:
+            url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots/{{ v2_snap_info.json.snapshot_results[0].snapshot_uuid }}/restore"
+            method: POST
+            user: "{{ nutanix_user }}"
+            password: "{{ nutanix_pass }}"
+            force_basic_auth: yes
+            validate_certs: false
+            body: {}
+          delegate_to: localhost
+
+        - name: Power On VM
+          nutanix.ncp.ntnx_vms:
+            nutanix_host: "{{ nutanix_host }}"
+            nutanix_username: "{{ nutanix_user }}"
+            nutanix_password: "{{ nutanix_pass }}"
+            validate_certs: false
+            state: "power_on"
+            vm_uuid: "{{ ntnx_uuid }}"
+          delegate_to: localhost
+
+        - name: Mark Failure
+          set_fact:
+            patch_status: "FAILED - ROLLED BACK"
 
     # ============================================================
-    # CAPTURE NEW PATCH DETAILS
+    # 5. REPORTING & CLEANUP
     # ============================================================
-
-    - name: Get details of newly installed patch
-      win_shell: |
-        $kb = "{{ kb_number }}"
-        if ($kb) {
-            $patch = Get-HotFix -Id $kb -ErrorAction SilentlyContinue
-            if ($patch) {
-                "$($patch.HotFixID)|$($patch.InstalledOn)"
-            }
-        }
-      register: new_patch_info
-      changed_when: false
-      failed_when: false
-      when: kb_number != ""
-
-    - name: Parse new patch details
-      set_fact:
-        new_kb_installed_on: "{{ new_patch_info.stdout.split('|')[1] | default('N/A') }}"
-      when: new_patch_info.stdout is defined and new_patch_info.stdout != ""
-
-
-    # ============================================================
-    # CLEANUP
-    # ============================================================
-
-    - name: Cleanup patch file
+    - name: Cleanup remote patch
       win_file:
-        path: "{{ dest_path }}"
+        path: "{{ remote_patch_path }}"
         state: absent
-      when: copy_res.changed
       ignore_errors: yes
 
-
-    # ============================================================
-    # REPORT GENERATION (QUOTED CSV)
-    # ============================================================
-
-    - name: Create CSV Header
+    - name: Create CSV Header (Merged columns)
       run_once: true
       delegate_to: localhost
       copy:
         dest: "{{ report_file }}"
         content: "\"Hostname\",\"IP_Address\",\"OS_Version\",\"Previous_KB\",\"Previous_KB_Date\",\"New_KB\",\"New_KB_Installed_On\",\"Patch_Status\",\"Reboot_Action\",\"Timestamp\"\n"
 
-    - name: Append host data to CSV
+    - name: Append data to CSV
       delegate_to: localhost
       throttle: 1
       lineinfile:
         path: "{{ report_file }}"
-        line: "\"{{ inventory_hostname }}\",\"{{ reporting_ip }}\",\"{{ full_os_name }}\",\"{{ previous_kb }}\",\"{{ previous_kb_date }}\",\"{{ kb_number | upper }}\",\"{{ new_kb_installed_on }}\",\"{{ patch_status | trim }}\",\"{{ reboot_status }}\",\"{{ lookup('pipe','date --iso-8601=seconds') }}\""
-
-
-    # ============================================================
-    # EMAIL REPORT
-    # ============================================================
-
-    - name: Check if report exists
-      run_once: true
-      delegate_to: localhost
-      stat:
-        path: "{{ report_file }}"
-      register: final_report_stat
+        line: "\"{{ inventory_hostname }}\",\"{{ reporting_ip }}\",\"{{ full_os_name }}\",\"{{ previous_kb }}\",\"{{ previous_kb_date }}\",\"{{ kb_number | upper }}\",\"{{ new_kb_installed_on }}\",\"{{ patch_status }}\",\"{{ reboot_status }}\",\"{{ lookup('pipe','date --iso-8601=seconds') }}\""
 
     - name: Email Final Report
       run_once: true
@@ -229,6 +217,5 @@
         secure: starttls
         to: "{{ email_recipient }}"
         subject: "PROD WINDOWS AUDIT: Patching Report Complete"
-        body: "Windows patching cycle complete. See attached report."
+        body: "Windows patching cycle for {{ kb_number | upper }} complete. See attached report."
         attach: "{{ report_file }}"
-      when: final_report_stat.stat.exists | default(false)
