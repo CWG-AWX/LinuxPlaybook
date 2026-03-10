@@ -50,12 +50,12 @@
       when: copy_res.changed
 
     - name: "PHASE 1: Create Pre-Patch Snapshot on Nutanix"
-      nutanix.ncp.ntnx_vms:
+      nutanix.ncp.ntnx_snapshots:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
         nutanix_password: "{{ nutanix_pass }}"
         validate_certs: false
-        state: snapshot
+        state: present
         vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
         snapshot_name: "{{ snapshot_name }}"
         description: "Pre-patch state fingerprinting Job {{ tower_job_id | default('Manual') }}"
@@ -127,7 +127,7 @@
       # ============================================================
       rescue:
         - name: "PHASE 4: Restore Nutanix Snapshot (Rollback)"
-          nutanix.ncp.ntnx_vms:
+          nutanix.ncp.ntnx_snapshots:
             nutanix_host: "{{ nutanix_host }}"
             nutanix_username: "{{ nutanix_user }}"
             nutanix_password: "{{ nutanix_pass }}"
