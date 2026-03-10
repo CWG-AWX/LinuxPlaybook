@@ -1,0 +1,201 @@
+---
+- name: Windows Multi-Host Security Patching (Dynamic Port Validation & Nutanix Recovery)
+  hosts: all
+  gather_facts: yes
+  
+  vars:
+    # --- PATCH FILE CONFIG ---
+    src_patch: "/mnt/updates/windows/windows10.0-kb5075906-x64_96e7590a40fbfde94dd84e3ed743ccd735f54654.msu"
+    remote_temp_dir: "C:\\Windows\\Temp"
+    remote_patch_path: "{{ remote_temp_dir }}\\patch_install.msu"
+    
+    # --- NUTANIX CONFIG (10.20.24.5) ---
+    nutanix_host: "10.20.24.5" 
+    nutanix_user: "{{ lookup('env', 'NUTANIX_USERNAME') }}"
+    nutanix_pass: "{{ lookup('env', 'NUTANIX_PASSWORD') }}"
+    snapshot_name: "PrePatch_{{ inventory_hostname }}_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}"
+
+    # --- REPORTING & SMTP CONFIG ---
+    report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
+    email_recipient: "abdullateef.adekogbe@cwg-plc.com"
+    smtp_server: "smtp.gmail.com"
+    smtp_port: 587
+    smtp_user: "ignioservices@gmail.com"
+
+  tasks:
+    # ============================================================
+    # PREPARATION & FINGERPRINTING
+    # ============================================================
+    - name: Set destination path
+      set_fact:
+        dest_path: "{{ remote_patch_path }}"
+
+    - name: Ensure patch file exists on AWX side
+      delegate_to: localhost
+      stat:
+        path: "{{ src_patch }}"
+      register: local_file
+
+    - name: Copy patch to Windows server
+      win_copy:
+        src: "{{ src_patch }}"
+        dest: "{{ dest_path }}"
+      register: copy_res
+
+    - name: "VALIDATION PREP: Capture Pre-Patch Listening Ports"
+      win_shell: |
+        Get-NetTCPConnection -State Listen | Select-Object -ExpandProperty LocalPort | Sort-Object -Unique
+      register: pre_patch_ports
+      changed_when: false
+      when: copy_res.changed
+
+    - name: "PHASE 1: Create Pre-Patch Snapshot on Nutanix"
+      nutanix.ncp.ntnx_vms:
+        nutanix_host: "{{ nutanix_host }}"
+        nutanix_username: "{{ nutanix_user }}"
+        nutanix_password: "{{ nutanix_pass }}"
+        validate_certs: false
+        state: snapshot
+        vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
+        snapshot_name: "{{ snapshot_name }}"
+        description: "Pre-patch state fingerprinting Job {{ tower_job_id | default('Manual') }}"
+      delegate_to: localhost
+      when: copy_res.changed
+      register: snapshot_info
+
+    # ============================================================
+    # INITIALIZE VARIABLES
+    # ============================================================
+    - name: Initialize reporting variables
+      set_fact:
+        patch_status: "No action taken"
+        reboot_status: "No reboot performed"
+        recovery_action: "None"
+        reporting_ip: "{{ ansible_host | default(inventory_hostname) }}"
+        full_os_name: "{{ ansible_distribution | default('Windows') }} {{ ansible_distribution_version | default(ansible_os_version) }}"
+        kb_number: "{{ (dest_path | regex_search('kb[0-9]+', ignorecase=True) | default('') | lower) }}"
+        new_kb_installed_on: "N/A"
+
+    # ============================================================
+    # PHASE 2: INSTALLATION BLOCK
+    # ============================================================
+    - name: Main Installation Block
+      block:
+        - name: "PHASE 2: Install .msu patch"
+          win_command: "wusa.exe '{{ dest_path }}' /quiet /norestart"
+          become: yes
+          become_method: runas
+          become_user: ansible_svc
+          async: 3600
+          poll: 30
+          register: install_result
+          when: copy_res.changed
+          failed_when: >
+            install_result.rc is defined and
+            install_result.rc not in [0, 3010, 17021, 2359302]
+
+        - name: Reboot if required
+          win_reboot:
+            reboot_timeout: 1200
+          register: reboot_result
+          when: (install_result.rc | default(0)) == 3010
+
+        - name: Update reboot status
+          set_fact:
+            reboot_status: "Reboot Completed"
+          when: reboot_result is defined and reboot_result.rebooted | default(false)
+
+        - name: "PHASE 3: Post-Patch Health Validation (Port Comparison)"
+          win_shell: |
+            $prePorts = "{{ pre_patch_ports.stdout_lines | join(',') }}".Split(',')
+            $postPorts = Get-NetTCPConnection -State Listen | Select-Object -ExpandProperty LocalPort | Sort-Object -Unique
+            $missingPorts = $prePorts | Where-Object { $_ -notin $postPorts }
+            if ($missingPorts) { exit 1 } else { exit 0 }
+          register: validation_result
+          retries: 5
+          delay: 45
+          until: validation_result.rc == 0
+          when: copy_res.changed
+          failed_when: validation_result.rc != 0
+
+        - name: Set success status
+          set_fact:
+            patch_status: "Success"
+
+      # ============================================================
+      # PHASE 4: AUTOMATED ROLLBACK (RESCUE)
+      # ============================================================
+      rescue:
+        - name: "PHASE 4: Restore Nutanix Snapshot (Rollback)"
+          nutanix.ncp.ntnx_vms:
+            nutanix_host: "{{ nutanix_host }}"
+            nutanix_username: "{{ nutanix_user }}"
+            nutanix_password: "{{ nutanix_pass }}"
+            validate_certs: false
+            state: restore
+            vm_name: "{{ ntnx_name | default(inventory_hostname) }}"
+            snapshot_name: "{{ snapshot_name }}"
+          delegate_to: localhost
+          when: snapshot_info is defined and snapshot_info.changed
+
+        - name: Set failure/recovery facts for report
+          set_fact:
+            patch_status: "FAILED - ROLLED BACK"
+            reboot_status: "Rollback Performed"
+            recovery_action: "Nutanix Restore Completed due to Service Failure"
+
+    # ============================================================
+    # CLEANUP & FINAL AUDIT
+    # ============================================================
+    - name: Cleanup patch file
+      win_file:
+        path: "{{ dest_path }}"
+        state: absent
+      ignore_errors: yes
+
+    - name: Get details of newly installed patch
+      win_shell: |
+        $kb = "{{ kb_number }}"
+        if ($kb) {
+            $patch = Get-HotFix -Id $kb -ErrorAction SilentlyContinue
+            if ($patch) { "$($patch.HotFixID)|$($patch.InstalledOn)" }
+        }
+      register: new_patch_info
+      changed_when: false
+      failed_when: false
+
+    - name: Parse new patch date
+      set_fact:
+        new_kb_installed_on: "{{ new_patch_info.stdout.split('|')[1] | default('N/A') }}"
+      when: new_patch_info.stdout is defined and new_patch_info.stdout != ""
+
+    # ============================================================
+    # REPORT GENERATION & EMAIL
+    # ============================================================
+    - name: Create CSV Header
+      run_once: true
+      delegate_to: localhost
+      copy:
+        dest: "{{ report_file }}"
+        content: "\"Hostname\",\"IP_Address\",\"Patch_Status\",\"Reboot_Action\",\"Recovery_Action\",\"Timestamp\"\n"
+
+    - name: Append host data to CSV
+      delegate_to: localhost
+      throttle: 1
+      lineinfile:
+        path: "{{ report_file }}"
+        line: "\"{{ inventory_hostname }}\",\"{{ reporting_ip }}\",\"{{ patch_status | trim }}\",\"{{ reboot_status }}\",\"{{ recovery_action }}\",\"{{ lookup('pipe','date --iso-8601=seconds') }}\""
+
+    - name: Email Final Report
+      run_once: true
+      delegate_to: localhost
+      community.general.mail:
+        host: "{{ smtp_server }}"
+        port: "{{ smtp_port }}"
+        username: "{{ smtp_user }}"
+        password: "{{ vault_smtp_password }}"
+        secure: starttls
+        to: "{{ email_recipient }}"
+        subject: "PROD WINDOWS AUDIT: Patching Report Complete"
+        body: "Windows patching cycle complete. Note: Check 'Recovery_Action' column for any automated Nutanix rollbacks."
+        attach: "{{ report_file }}"
