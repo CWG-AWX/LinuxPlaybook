@@ -1,5 +1,5 @@
 ---
-- name: Windows Security Patching with Automated Rollback & Port Audit
+- name: Windows Multi-Host Security Patching & Audit (PE v2.0)
   hosts: all
   gather_facts: yes
   
@@ -9,14 +9,14 @@
     remote_temp_dir: "C:\\Windows\\Temp"
     remote_patch_path: "{{ remote_temp_dir }}\\patch_install.msu"
     
-    # --- NUTANIX CONFIG (Prism Element v2.0) ---
+    # --- NUTANIX CONFIG (Prism Element) ---
     nutanix_host: "10.20.24.5" 
     nutanix_user: "michael" 
     nutanix_pass: "Oba@2024"
     snap_name: "PrePatch_{{ inventory_hostname | replace('.', '_') }}_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}"
 
-    # --- REPORTING & SMTP CONFIG (From Template) ---
-    report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
+    # --- REPORTING & SMTP (Using Vault Variable) ---
+    report_file: "/tmp/windows_patch_audit_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
     email_recipient: "abdullateef.adekogbe@cwg-plc.com"
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
@@ -24,34 +24,33 @@
 
   tasks:
     # ============================================================
-    # PHASE 1: PRE-PATCH AUDIT & SYSTEM STATE CAPTURE
+    # PHASE 1: PRE-CHECK AUDIT & UUID GATHERING
     # ============================================================
-    - name: Get Last Installed KB
-      win_shell: |
-        $last = Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 1
-        if ($last) { "$($last.HotFixID)|$($last.InstalledOn)" }
-      register: previous_patch_info
-
-    - name: Capture Pre-Patch Listening Ports
-      win_shell: |
-        Get-NetTCPConnection -State Listen | Select-Object -ExpandProperty LocalPort | Sort-Object -Unique
-      register: pre_ports
-
-    - name: Get Nutanix VM UUID
-      nutanix.ncp.ntnx_vms_info:
-        nutanix_host: "{{ nutanix_host }}"
-        nutanix_username: "{{ nutanix_user }}"
-        nutanix_password: "{{ nutanix_pass }}"
-        filter: { vm_name: "{{ ntnx_name | default(inventory_hostname) }}" }
+    - name: Get VM UUID via Direct API (Stability Fix)
+      uri:
+        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/?filter=vm_name%3D%3D{{ inventory_hostname }}"
+        method: GET
+        user: "{{ nutanix_user }}"
+        password: "{{ nutanix_pass }}"
+        force_basic_auth: yes
+        validate_certs: false
       delegate_to: localhost
-      register: vm_details
+      register: vm_search
 
-    - name: Initialize Reporting Facts
+    - name: Capture Pre-Patch System State
+      win_shell: |
+        $ports = Get-NetTCPConnection -State Listen | Select-Object -ExpandProperty LocalPort | Sort-Object -Unique
+        $lastKB = Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 1
+        Write-Output "$($ports -join ',');$($lastKB.HotFixID);$($lastKB.InstalledOn)"
+      register: pre_audit_raw
+
+    - name: Set System Facts
       set_fact:
-        ntnx_uuid: "{{ vm_details.response.entities[0].metadata.uuid if vm_details.response is defined else vm_details.entities[0].metadata.uuid }}"
-        previous_kb: "{{ previous_patch_info.stdout.split('|')[0] | default('N/A') }}"
-        previous_kb_date: "{{ previous_patch_info.stdout.split('|')[1] | default('N/A') }}"
-        kb_number: "{{ src_patch | regex_search('kb[0-9]+', ignorecase=True) | default('KB5075906') | upper }}"
+        ntnx_uuid: "{{ vm_search.json.entities[0].uuid }}"
+        pre_ports: "{{ pre_audit_raw.stdout.split(';')[0] }}"
+        prev_kb: "{{ pre_audit_raw.stdout.split(';')[1] | default('N/A') }}"
+        prev_kb_date: "{{ pre_audit_raw.stdout.split(';')[2] | default('N/A') }}"
+        target_kb: "{{ src_patch | regex_search('kb[0-9]+', ignorecase=True) | default('KB5075906') | upper }}"
         patch_status: "Pending"
         reboot_status: "No reboot performed"
         recovery_action: "None"
@@ -71,50 +70,46 @@
             - vm_uuid: "{{ ntnx_uuid }}"
               snapshot_name: "{{ snap_name }}"
       delegate_to: localhost
-      register: snap_trigger
+      register: v2_snap_info
 
     # ============================================================
-    # PHASE 2: INSTALLATION & POST-PATCH VALIDATION
+    # PHASE 2: INSTALLATION & PORT VALIDATION
     # ============================================================
-    - name: Patching and Verification Block
+    - name: Main Patching Logic
       block:
-        - name: Copy patch to Windows server
+        - name: Copy Patch to Windows Host
           win_copy:
             src: "{{ src_patch }}"
             dest: "{{ remote_patch_path }}"
 
-        - name: Install .msu patch
+        - name: Execute WUSA Installation
           win_command: "wusa.exe {{ remote_patch_path }} /quiet /norestart"
           become: yes
           become_method: runas
           become_user: ansible_svc
           register: install_result
-          failed_when: "install_result.rc not in [0, 3010, 17021, 2359302]"
+          failed_when: "install_result.rc not in [0, 3010, 2359302]"
 
-        - name: Reboot if required
+        - name: Handle Reboot
           win_reboot:
-            reboot_timeout: 900
+            reboot_timeout: 1200
           register: reboot_result
           when: install_result.rc == 3010
 
-        - name: Update reboot status
-          set_fact:
-            reboot_status: "Reboot Completed"
-          when: reboot_result is defined and reboot_result.rebooted
-
-        - name: Post-Reboot Port Validation
+        - name: Post-Patch Port Validation (Retry loop for app startup)
           win_shell: |
-            $pre = "{{ pre_ports.stdout_lines | join(',') }}".Split(',')
+            $pre = "{{ pre_ports }}".Split(',')
             $post = Get-NetTCPConnection -State Listen | Select-Object -ExpandProperty LocalPort
             foreach ($p in $pre) { if ($p -and ($p -notin $post)) { exit 1 } }
           register: port_check
-          retries: 10
+          retries: 15
           delay: 30
           until: port_check.rc == 0
 
-        - name: Set Success Status
+        - name: Mark Success
           set_fact:
-            patch_status: "Success (Ports Validated)"
+            patch_status: "Success (Verified)"
+            reboot_status: "{{ 'Rebooted' if (reboot_result.rebooted | default(false)) else 'No Reboot Needed' }}"
 
       # ============================================================
       # PHASE 3: RECOVERY PHASE (ROLLBACK)
@@ -131,7 +126,7 @@
 
         - name: Restore VM to Pre-Patch Snapshot
           uri:
-            url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots/{{ snap_trigger.json.task_uuid }}/restore"
+            url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots/{{ v2_snap_info.json.task_uuid }}/restore"
             method: POST
             user: "{{ nutanix_user }}"
             password: "{{ nutanix_pass }}"
@@ -152,26 +147,26 @@
         - name: Log Rollback Event
           set_fact:
             patch_status: "FAILED"
-            recovery_action: "Automatic Rollback (Port Failure)"
+            recovery_action: "Automatic Rollback (Port Validation Failed)"
 
     # ============================================================
-    # PHASE 4: REPORTING & SMTP
+    # PHASE 4: AUDIT REPORTING & SMTP
     # ============================================================
-    - name: Create CSV Header
+    - name: Create Audit CSV Header
       run_once: true
       delegate_to: localhost
       copy:
         dest: "{{ report_file }}"
-        content: "\"Hostname\",\"IP\",\"Prev_KB\",\"Prev_Date\",\"Target_KB\",\"Status\",\"Reboot\",\"Recovery\",\"Timestamp\"\n"
+        content: "\"Hostname\",\"Prev_KB\",\"Prev_Date\",\"Target_KB\",\"Status\",\"Reboot\",\"Recovery\",\"Timestamp\"\n"
 
     - name: Append data to CSV
       delegate_to: localhost
       throttle: 1
       lineinfile:
         path: "{{ report_file }}"
-        line: "\"{{ inventory_hostname }}\",\"{{ ansible_host }}\",\"{{ previous_kb }}\",\"{{ previous_kb_date }}\",\"{{ kb_number }}\",\"{{ patch_status }}\",\"{{ reboot_status }}\",\"{{ recovery_action }}\",\"{{ lookup('pipe','date --iso-8601=seconds') }}\""
+        line: "\"{{ inventory_hostname }}\",\"{{ prev_kb }}\",\"{{ prev_kb_date }}\",\"{{ target_kb }}\",\"{{ patch_status }}\",\"{{ reboot_status }}\",\"{{ recovery_action }}\",\"{{ lookup('pipe','date --iso-8601=seconds') }}\""
 
-    - name: Email Final Report
+    - name: Email Final Audit Report
       run_once: true
       delegate_to: localhost
       community.general.mail:
@@ -181,6 +176,6 @@
         password: "{{ vault_smtp_password }}"
         secure: starttls
         to: "{{ email_recipient }}"
-        subject: "WINDOWS AUDIT: Patching and Rollback Cycle Complete"
-        body: "Windows patching cycle complete. Report includes pre/post patch state audit."
+        subject: "PROD WINDOWS AUDIT: Patching and Rollback Cycle Complete"
+        body: "Windows patching cycle complete. Attached is the audit report verifying port states and KB history."
         attach: "{{ report_file }}"
