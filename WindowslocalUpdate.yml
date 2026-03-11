@@ -1,5 +1,5 @@
 ---
-- name: Windows Patching with Service-Port Mapping & Rollback Test
+- name: Windows Security Patching with Service Mapping & Recovery
   hosts: all
   gather_facts: yes
   
@@ -17,16 +17,16 @@
 
     # --- REPORTING & SMTP ---
     report_file: "/tmp/windows_patch_audit_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
-    email_recipient: "blaizymike@gmail.com"
+    email_recipient: "abdullateef.adekogbe@cwg-plc.com"
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
 
   tasks:
     # ============================================================
-    # PHASE 1: PRE-PATCH SERVICE & PORT AUDIT
+    # PHASE 1: PRE-PATCH AUDIT
     # ============================================================
-    - name: Get VM UUID
+    - name: Get VM UUID via Direct API
       uri:
         url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/?filter=vm_name%3D%3D{{ inventory_hostname }}"
         method: GET
@@ -37,24 +37,29 @@
       delegate_to: localhost
       register: vm_search
 
-    - name: Audit Pre-Patch Services and Ports
+    - name: Capture Pre-Patch Ports and Services
       win_shell: |
-        $connections = Get-NetTCPConnection -State Listen
-        $report = foreach ($conn in $connections) {
-            $process = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
-            "$($conn.LocalPort):$($process.Name)"
+        $conns = Get-NetTCPConnection -State Listen
+        $map = foreach ($c in $conns) {
+            $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
+            "$($c.LocalPort):$($p.Name)"
         }
         $lastKB = Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 1
-        Write-Output "$(($report | Sort-Object -Unique) -join ',');$($lastKB.HotFixID)"
+        Write-Output "$(($map | Sort-Object -Unique) -join ',');$($lastKB.HotFixID)"
       register: pre_audit_raw
 
     - name: Set System Facts
       set_fact:
         ntnx_uuid: "{{ vm_search.json.entities[0].uuid }}"
-        pre_service_map: "{{ pre_audit_raw.stdout.split(';')[0] }}"
+        pre_services: "{{ pre_audit_raw.stdout.split(';')[0] }}"
+        pre_port_count: "{{ pre_audit_raw.stdout.split(';')[0].split(',') | length }}"
         prev_kb: "{{ pre_audit_raw.stdout.split(';')[1] | default('N/A') }}"
         target_kb: "{{ src_patch | regex_search('kb[0-9]+', ignorecase=True) | default('KB5075906') | upper }}"
         patch_status: "Pending"
+
+    - name: "DISPLAY: Pre-Patch Service Inventory"
+      debug:
+        msg: "LISTENING BEFORE PATCH: {{ pre_services }}"
 
     - name: Create Safety Snapshot
       uri:
@@ -64,8 +69,6 @@
         password: "{{ nutanix_pass }}"
         force_basic_auth: yes
         validate_certs: false
-        body_format: json
-        status_code: [200, 201, 202]
         body:
           snapshot_specs:
             - vm_uuid: "{{ ntnx_uuid }}"
@@ -74,16 +77,16 @@
       register: v2_snap_info
 
     # ============================================================
-    # PHASE 2: INSTALLATION & MAPPED VALIDATION
+    # PHASE 2: INSTALL & POST-PATCH VALIDATION
     # ============================================================
-    - name: Main Patching Logic
+    - name: Execution Block
       block:
         - name: Copy and Install Patch
           win_copy:
             src: "{{ src_patch }}"
             dest: "{{ remote_patch_path }}"
 
-        - name: Execute WUSA
+        - name: Run WUSA Installer
           win_command: "wusa.exe {{ remote_patch_path }} /quiet /norestart"
           become: yes
           become_method: runas
@@ -96,53 +99,63 @@
             reboot_timeout: 1200
           when: install_result.rc == 3010
 
-        - name: Post-Patch Service/Port Mapping
+        - name: Post-Patch Validation (The Rollback Trigger)
           win_shell: |
-            $pre_map = "{{ pre_service_map }}".Split(',')
+            $pre = "{{ pre_services }}".Split(',')
             $post_conns = Get-NetTCPConnection -State Listen
             $post_map = foreach ($c in $post_conns) {
                 $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
                 "$($c.LocalPort):$($p.Name)"
             }
-            # Check if all pre-patch services are still here
-            foreach ($item in $pre_map) {
-                if ($item -and ($item -notin $post_map)) { exit 1 }
-            }
-            Write-Output (($post_map | Sort-Object -Unique) -join ' | ')
+            # EXIT 1 triggers the rescue block if a pre-patch service is missing
+            foreach ($s in $pre) { if ($s -and ($s -notin $post_map)) { exit 1 } }
+            Write-Output "$(($post_map | Sort-Object -Unique) -join ',')"
           register: post_audit
           retries: 15
           delay: 30
           until: post_audit.rc == 0
 
-        - name: Mark Success
-          set_fact:
-            patch_status: "Success (All Services Verified)"
-            final_service_list: "{{ post_audit.stdout }}"
+        - name: "DISPLAY: Post-Patch Service Inventory"
+          debug:
+            msg: "LISTENING AFTER PATCH: {{ post_audit.stdout }}"
 
+        - name: Confirm Success
+          set_fact:
+            patch_status: "Success"
+            post_port_count: "{{ post_audit.stdout.split(',') | length }}"
+
+      # ============================================================
+      # PHASE 3: AUTOMATIC ROLLBACK (ON FAILURE)
+      # ============================================================
       rescue:
-        - name: LOG ROLLBACK (Automatic Trigger)
+        - name: "RECOVERY: Restore System"
+          include_tasks: restore_logic.yml # You can put the 3 Nutanix tasks here or keep them inline
+          vars:
+            recovery_msg: "Validation Failed: Port Missing"
+
+        - name: Set Failure Facts
           set_fact:
-            patch_status: "FAILED - TRIGGERING RESTORE"
-            final_service_list: "SERVICE_MISSING_ERROR"
+            patch_status: "FAILED - ROLLED BACK"
+            post_port_count: "0 (Reverted)"
 
     # ============================================================
-    # PHASE 3: REPORTING & SMTP
+    # PHASE 4: AUDIT REPORTING & EMAIL
     # ============================================================
-    - name: Create Audit CSV
+    - name: Create CSV Header
       run_once: true
       delegate_to: localhost
       copy:
         dest: "{{ report_file }}"
-        content: "\"Hostname\",\"Prev_KB\",\"Target_KB\",\"Status\",\"Service_Port_Map\",\"Timestamp\"\n"
+        content: "\"Hostname\",\"Prev_KB\",\"Target_KB\",\"Status\",\"Pre_Port_Count\",\"Post_Port_Count\",\"Timestamp\"\n"
 
-    - name: Append data to CSV
+    - name: Append Audit Results
       delegate_to: localhost
       throttle: 1
       lineinfile:
         path: "{{ report_file }}"
-        line: "\"{{ inventory_hostname }}\",\"{{ prev_kb }}\",\"{{ target_kb }}\",\"{{ patch_status }}\",\"{{ final_service_list }}\",\"{{ lookup('pipe','date --iso-8601=seconds') }}\""
+        line: "\"{{ inventory_hostname }}\",\"{{ prev_kb }}\",\"{{ target_kb }}\",\"{{ patch_status }}\",\"{{ pre_port_count }}\",\"{{ post_port_count }}\",\"{{ lookup('pipe','date --iso-8601=seconds') }}\""
 
-    - name: Email Final Report
+    - name: Email Audit Report
       run_once: true
       delegate_to: localhost
       community.general.mail:
@@ -152,15 +165,13 @@
         password: "{{ vault_smtp_password }}"
         secure: starttls
         to: "{{ email_recipient }}"
-        subject: "PROD WINDOWS AUDIT: Service Mapping Complete"
-        body: "Attached is the audit report showing all active services and ports per host."
+        subject: "PROD WINDOWS AUDIT: Patch Cycle Complete"
+        body: "Attached is the port count audit for the current cycle."
         attach: "{{ report_file }}"
 
     # ============================================================
-    # PHASE 4: ROLLBACK VERIFICATION (MANUAL TEST TASK)
+    # PHASE 5: MANUAL ROLLBACK TEST (Triggered via -e verify_rollback_test=true)
     # ============================================================
-    # WARNING: This task is for testing your restore mechanism. 
-    # It will restore the VM even if the patch succeeded.
     - name: "TESTING: Verify Rollback Mechanism"
       block:
         - name: Shutdown for Restore Test
@@ -191,4 +202,4 @@
             state: "power_on"
             vm_uuid: "{{ ntnx_uuid }}"
           delegate_to: localhost
-      when: verify_rollback_test=true | default(false) # Trigger this by passing -e "verify_rollback_test=true"
+      when: verify_rollback_test | default(true) | bool
