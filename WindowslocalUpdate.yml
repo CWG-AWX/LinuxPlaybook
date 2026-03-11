@@ -1,13 +1,12 @@
 ---
-- name: Windows Multi-Host Security Patching (Prism Element v2.0 Version)
+- name: Windows Multi-Host Security Patching (Prism Element v2.0)
   hosts: all
   gather_facts: yes
   
   vars:
     # --- PATCH FILE CONFIG ---
     src_patch: "/mnt/updates/windows/windows10.0-kb5075906-x64_96e7590a40fbfde94dd84e3ed743ccd735f54654.msu"
-    remote_temp_dir: "C:/Windows/Temp"
-    remote_patch_path: "{{ remote_temp_dir }}/patch_install.msu"
+    remote_patch_path: "C:/Windows/Temp/patch_install.msu"
     
     # --- NUTANIX CONFIG (Prism Element) ---
     nutanix_host: "10.20.24.5" 
@@ -17,16 +16,16 @@
 
     # --- REPORTING & SMTP ---
     report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
-    email_recipient: "abdullateef.adekogbe@cwg-plc.com"
+    email_recipient: "blaizymike@gmail.com"
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
-    # Ensure this matches your vault variable name
-    smtp_password: "{{ vault_smtp_password }}"
+    # Use your Gmail App Password here
+    smtp_password: "your_gmail_app_password" 
 
   tasks:
     # ============================================================
-    # 1. PRE-CHECK & UUID GATHERING
+    # 1. PRE-CHECKS & NUTANIX UUID GATHERING
     # ============================================================
     - name: Get Nutanix VM UUID
       nutanix.ncp.ntnx_vms_info:
@@ -43,6 +42,18 @@
       set_fact:
         ntnx_uuid: "{{ (vm_details.response.entities[0].metadata.uuid) if vm_details.response is defined else (vm_details.entities[0].metadata.uuid) }}"
 
+    - name: Initialize Status Facts
+      set_fact:
+        patch_status: "Pending"
+        reboot_status: "No reboot performed"
+        recovery_action: "None"
+        reporting_ip: "{{ ansible_host | default(inventory_hostname) }}"
+
+    # ============================================================
+    # 2. NUTANIX SNAPSHOT (The "Safety Net")
+    # ============================================================
+    
+
     - name: Create Pre-Patch Snapshot (v2.0)
       uri:
         url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots"
@@ -52,6 +63,7 @@
         force_basic_auth: yes
         validate_certs: false
         body_format: json
+        status_code: [200, 201, 202] # Fixed: Handles the '201 Created' response
         body:
           snapshot_specs:
             - vm_uuid: "{{ ntnx_uuid }}"
@@ -59,12 +71,27 @@
       delegate_to: localhost
       register: v2_snap_info
 
+    - name: Wait for Snapshot Task Completion
+      uri:
+        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/tasks/{{ v2_snap_info.json.task_uuid }}"
+        method: GET
+        user: "{{ nutanix_user }}"
+        password: "{{ nutanix_pass }}"
+        force_basic_auth: yes
+        validate_certs: false
+        status_code: [200, 201, 202]
+      delegate_to: localhost
+      register: v2_task_status
+      until: "v2_task_status.json.progress_status == 'Succeeded'"
+      retries: 20
+      delay: 10
+
     # ============================================================
-    # 2. INSTALLATION & VALIDATION BLOCK
+    # 3. PATCHING BLOCK
     # ============================================================
     - name: Main Patching Logic
       block:
-        - name: Copy Patch to Host
+        - name: Copy Patch to Windows Host
           win_copy:
             src: "{{ src_patch }}"
             dest: "{{ remote_patch_path }}"
@@ -73,22 +100,29 @@
           win_command: "wusa.exe {{ remote_patch_path }} /quiet /norestart"
           become: yes
           become_method: runas
-          become_user: ansible_svc
+          become_user: Administrator # Or your designated Domain Admin account
           async: 3600
           poll: 30
           register: install_result
           failed_when: "install_result.rc not in [0, 3010, 2359302]"
 
-        - name: Handle Reboot
+        - name: Handle Reboot if Required
           win_reboot:
             reboot_timeout: 1200
+          register: reboot_result
           when: install_result.rc == 3010
 
+        - name: Update Reboot Status
+          set_fact:
+            reboot_status: "Reboot Completed"
+            patch_status: "Success"
+          when: reboot_result is defined and reboot_result.rebooted
+
       # ============================================================
-      # 3. AUTOMATED ROLLBACK (RESCUE)
+      # 4. AUTOMATED ROLLBACK (RESCUE)
       # ============================================================
       rescue:
-        - name: Power Off VM
+        - name: Power Off VM for Restore
           nutanix.ncp.ntnx_vms:
             nutanix_host: "{{ nutanix_host }}"
             nutanix_username: "{{ nutanix_user }}"
@@ -120,9 +154,28 @@
             vm_uuid: "{{ ntnx_uuid }}"
           delegate_to: localhost
 
+        - name: Mark Failure
+          set_fact:
+            patch_status: "FAILED - ROLLED BACK"
+            recovery_action: "Snapshot reverted due to installation failure"
+
     # ============================================================
-    # 4. REPORTING
+    # 5. FINAL REPORTING
     # ============================================================
+    - name: Create CSV Header
+      run_once: true
+      delegate_to: localhost
+      copy:
+        dest: "{{ report_file }}"
+        content: "\"Hostname\",\"IP\",\"Status\",\"Reboot\",\"Recovery\",\"Timestamp\"\n"
+
+    - name: Append Results to CSV
+      delegate_to: localhost
+      throttle: 1
+      lineinfile:
+        path: "{{ report_file }}"
+        line: "\"{{ inventory_hostname }}\",\"{{ reporting_ip }}\",\"{{ patch_status }}\",\"{{ reboot_status }}\",\"{{ recovery_action }}\",\"{{ lookup('pipe','date --iso-8601=seconds') }}\""
+
     - name: Send Email Report
       run_once: true
       delegate_to: localhost
@@ -133,5 +186,6 @@
         password: "{{ smtp_password }}"
         secure: starttls
         to: "{{ email_recipient }}"
-        subject: "WINDOWS PATCHING REPORT"
-        body: "Patching cycle complete."
+        subject: "PROD PATCHING REPORT: {{ lookup('pipe','date +%Y-%m-%d') }}"
+        body: "Attached is the automated report for the current patching cycle."
+        attach: "{{ report_file }}"
