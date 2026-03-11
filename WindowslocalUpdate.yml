@@ -16,7 +16,7 @@
 
     # --- REPORTING & SMTP CONFIG (Updated from your snippet) ---
     report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
-    email_recipient: "abdullateef.adekogbe@cwg-plc.com"
+    email_recipient: "blaizymike@gmail.com"
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
