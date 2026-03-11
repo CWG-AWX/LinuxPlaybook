@@ -24,14 +24,14 @@
 
   tasks:
     # ============================================================
-    # PHASE 1: PRE-PATCH AUDIT & SNAPSHOT
+    # PHASE 1: PRE-PATCH AUDIT
     # ============================================================
-    - name: Get VM UUID via Direct API
+    - name: Get VM UUID
       uri:
         url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/?filter=vm_name%3D%3D{{ inventory_hostname }}"
         method: GET
-        user: "{{ nutanix_user | string }}"
-        password: "{{ nutanix_pass | string }}"
+        user: "{{ nutanix_user }}"
+        password: "{{ nutanix_pass }}"
         force_basic_auth: yes
         validate_certs: false
       delegate_to: localhost
@@ -61,19 +61,17 @@
       debug:
         msg: "LISTENING BEFORE PATCH: {{ pre_services }}"
 
-    - name: Create Safety Snapshot (Direct API)
+    - name: Create Safety Snapshot
       uri:
         url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots"
         method: POST
-        user: "{{ nutanix_user | string }}"
-        password: "{{ nutanix_pass | string }}"
+        user: "{{ nutanix_user }}"
+        password: "{{ nutanix_pass }}"
         force_basic_auth: yes
         validate_certs: false
         body_format: json
         body:
-          snapshot_specs:
-            - vm_uuid: "{{ ntnx_uuid }}"
-              snapshot_name: "{{ snap_name }}"
+          snapshot_specs: [{ "vm_uuid": "{{ ntnx_uuid }}", "snapshot_name": "{{ snap_name }}" }]
       delegate_to: localhost
       register: v2_snap_info
 
@@ -129,21 +127,20 @@
           uri:
             url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/{{ ntnx_uuid }}/set_power_state"
             method: POST
-            user: "{{ nutanix_user | string }}"
-            password: "{{ nutanix_pass | string }}"
+            user: "{{ nutanix_user }}"
+            password: "{{ nutanix_pass }}"
             force_basic_auth: yes
             validate_certs: false
             body_format: json
-            body:
-              transition: "OFF"
+            body: { "transition": "OFF" }
           delegate_to: localhost
 
         - name: "RECOVERY: Restore System"
           uri:
             url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots/{{ v2_snap_info.json.task_uuid }}/restore"
             method: POST
-            user: "{{ nutanix_user | string }}"
-            password: "{{ nutanix_pass | string }}"
+            user: "{{ nutanix_user }}"
+            password: "{{ nutanix_pass }}"
             force_basic_auth: yes
             validate_certs: false
             body: {}
@@ -153,13 +150,12 @@
           uri:
             url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/{{ ntnx_uuid }}/set_power_state"
             method: POST
-            user: "{{ nutanix_user | string }}"
-            password: "{{ nutanix_pass | string }}"
+            user: "{{ nutanix_user }}"
+            password: "{{ nutanix_pass }}"
             force_basic_auth: yes
             validate_certs: false
             body_format: json
-            body:
-              transition: "ON"
+            body: { "transition": "ON" }
           delegate_to: localhost
 
     # ============================================================
@@ -194,44 +190,42 @@
         attach: "{{ report_file }}"
 
     # ============================================================
-    # PHASE 4: MANUAL ROLLBACK TEST (Triggered via -e verify_rollback_test=true)
+    # PHASE 4: MANUAL ROLLBACK TEST
     # ============================================================
     - name: "TESTING: Verify Rollback Mechanism"
       block:
-        - name: Shutdown for Restore Test (API Call)
+        - name: Shutdown for Restore Test
           uri:
             url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/{{ ntnx_uuid }}/set_power_state"
             method: POST
-            user: "{{ nutanix_user | string }}"
-            password: "{{ nutanix_pass | string }}"
+            user: "{{ nutanix_user }}"
+            password: "{{ nutanix_pass }}"
             force_basic_auth: yes
             validate_certs: false
             body_format: json
-            body:
-              transition: "OFF"
+            body: { "transition": "OFF" }
           delegate_to: localhost
 
         - name: Restore from Pre-Patch Snapshot
           uri:
             url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots/{{ v2_snap_info.json.task_uuid }}/restore"
             method: POST
-            user: "{{ nutanix_user | string }}"
-            password: "{{ nutanix_pass | string }}"
+            user: "{{ nutanix_user }}"
+            password: "{{ nutanix_pass }}"
             force_basic_auth: yes
             validate_certs: false
             body: {}
           delegate_to: localhost
 
-        - name: Power On After Restore (API Call)
+        - name: Power On After Restore
           uri:
             url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/{{ ntnx_uuid }}/set_power_state"
             method: POST
-            user: "{{ nutanix_user | string }}"
-            password: "{{ nutanix_pass | string }}"
+            user: "{{ nutanix_user }}"
+            password: "{{ nutanix_pass }}"
             force_basic_auth: yes
             validate_certs: false
             body_format: json
-            body:
-              transition: "ON"
+            body: { "transition": "ON" }
           delegate_to: localhost
       when: verify_rollback_test | default(true) | bool
