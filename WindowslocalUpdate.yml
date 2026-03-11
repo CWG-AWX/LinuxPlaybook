@@ -30,10 +30,11 @@
       uri:
         url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/?filter=vm_name%3D%3D{{ inventory_hostname }}"
         method: GET
-        user: "{{ nutanix_user }}"
-        password: "{{ nutanix_pass }}"
+        user: "{{ nutanix_user | string }}"
+        password: "{{ nutanix_pass | string }}"
         force_basic_auth: yes
         validate_certs: false
+        return_content: yes
       delegate_to: localhost
       register: vm_search
 
@@ -65,10 +66,11 @@
       uri:
         url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots"
         method: POST
-        user: "{{ nutanix_user }}"
-        password: "{{ nutanix_pass }}"
+        user: "{{ nutanix_user | string }}"
+        password: "{{ nutanix_pass | string }}"
         force_basic_auth: yes
         validate_certs: false
+        body_format: json
         status_code: [200, 201, 202]
         body:
           snapshot_specs:
@@ -91,7 +93,7 @@
           win_command: "wusa.exe {{ remote_patch_path }} /quiet /norestart"
           become: yes
           become_method: runas
-          become_user: ansible_svc
+          become_user: Administrator
           register: install_result
           failed_when: "install_result.rc not in [0, 3010, 2359302]"
 
@@ -100,7 +102,7 @@
             reboot_timeout: 1200
           when: install_result.rc == 3010
 
-        - name: Post-Patch Validation (The Rollback Trigger)
+        - name: Post-Patch Validation (Rollback Trigger)
           win_shell: |
             $pre = "{{ pre_services }}".Split(',')
             $post_conns = Get-NetTCPConnection -State Listen
@@ -108,7 +110,6 @@
                 $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
                 "$($c.LocalPort):$($p.Name)"
             }
-            # EXIT 1 triggers the rescue block if a pre-patch service is missing
             foreach ($s in $pre) { if ($s -and ($s -notin $post_map)) { exit 1 } }
             Write-Output "$(($post_map | Sort-Object -Unique) -join ',')"
           register: post_audit
@@ -125,14 +126,35 @@
             patch_status: "Success"
             post_port_count: "{{ post_audit.stdout.split(',') | length }}"
 
-      # ============================================================
-      # PHASE 3: AUTOMATIC ROLLBACK (ON FAILURE)
-      # ============================================================
       rescue:
+        - name: "RECOVERY: Shutdown Affected Instance"
+          nutanix.ncp.ntnx_vms:
+            nutanix_host: "{{ nutanix_host }}"
+            nutanix_username: "{{ nutanix_user }}"
+            nutanix_password: "{{ nutanix_pass }}"
+            state: "power_off"
+            vm_uuid: "{{ ntnx_uuid }}"
+          delegate_to: localhost
+
         - name: "RECOVERY: Restore System"
-          include_tasks: restore_logic.yml # You can put the 3 Nutanix tasks here or keep them inline
-          vars:
-            recovery_msg: "Validation Failed: Port Missing"
+          uri:
+            url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots/{{ v2_snap_info.json.task_uuid }}/restore"
+            method: POST
+            user: "{{ nutanix_user | string }}"
+            password: "{{ nutanix_pass | string }}"
+            force_basic_auth: yes
+            validate_certs: false
+            body: {}
+          delegate_to: localhost
+
+        - name: "RECOVERY: Power On"
+          nutanix.ncp.ntnx_vms:
+            nutanix_host: "{{ nutanix_host }}"
+            nutanix_username: "{{ nutanix_user }}"
+            nutanix_password: "{{ nutanix_pass }}"
+            state: "power_on"
+            vm_uuid: "{{ ntnx_uuid }}"
+          delegate_to: localhost
 
         - name: Set Failure Facts
           set_fact:
@@ -140,7 +162,7 @@
             post_port_count: "0 (Reverted)"
 
     # ============================================================
-    # PHASE 4: AUDIT REPORTING & EMAIL
+    # PHASE 3: AUDIT REPORTING & EMAIL
     # ============================================================
     - name: Create CSV Header
       run_once: true
@@ -171,7 +193,7 @@
         attach: "{{ report_file }}"
 
     # ============================================================
-    # PHASE 5: MANUAL ROLLBACK TEST (Triggered via -e verify_rollback_test=true)
+    # PHASE 4: MANUAL ROLLBACK TEST
     # ============================================================
     - name: "TESTING: Verify Rollback Mechanism"
       block:
@@ -188,8 +210,8 @@
           uri:
             url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots/{{ v2_snap_info.json.task_uuid }}/restore"
             method: POST
-            user: "{{ nutanix_user }}"
-            password: "{{ nutanix_pass }}"
+            user: "{{ nutanix_user | string }}"
+            password: "{{ nutanix_pass | string }}"
             force_basic_auth: yes
             validate_certs: false
             body: {}
@@ -203,4 +225,4 @@
             state: "power_on"
             vm_uuid: "{{ ntnx_uuid }}"
           delegate_to: localhost
-      when: verify_rollback_test | default(true) | bool
+      when: verify_rollback_test | default(false) | bool
