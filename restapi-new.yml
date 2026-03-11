@@ -27,7 +27,7 @@
       set_fact:
         ntnx_uuid: "{{ vm_search.json.entities[0].uuid }}"
 
-    - name: "STEP 1: Create Snapshot"
+    - name: "STEP 1: Create Snapshot (v2 API)"
       uri:
         url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots"
         method: POST
@@ -86,9 +86,9 @@
     - name: Wait for Power Off
       pause: seconds=30
 
-    - name: "STEP 3: Restore Snapshot"
+    - name: "STEP 3: Restore Snapshot (Revert via v3 API)"
       uri:
-        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots/{{ snapshot_uuid }}/restore"
+        url: "https://{{ nutanix_host }}:9440/api/nutanix/v3/vms/{{ ntnx_uuid }}/revert"
         method: POST
         user: "{{ nutanix_user }}"
         password: "{{ nutanix_pass }}"
@@ -98,7 +98,8 @@
           Accept: "application/json"
           Content-Type: "application/json"
         body_format: json
-        body: {}
+        body:
+          vm_recovery_point_uuid: "{{ snapshot_uuid }}"
         status_code: [200, 201, 202]
       delegate_to: localhost
 
