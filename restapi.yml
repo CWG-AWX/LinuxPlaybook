@@ -19,6 +19,8 @@
         password: "{{ nutanix_pass }}"
         force_basic_auth: yes
         validate_certs: false
+        headers:
+          Accept: "application/json"
       delegate_to: localhost
       register: vm_search
 
@@ -35,9 +37,13 @@
         password: "{{ nutanix_pass }}"
         force_basic_auth: yes
         validate_certs: false
+        headers:
+          Accept: "application/json"
+          Content-Type: "application/json"
         body_format: json
         body:
           transition: "OFF"
+        status_code: [200, 201, 202] # THIS IS THE FIX
       delegate_to: localhost
       register: power_off_res
 
@@ -45,11 +51,10 @@
       debug:
         msg: "Power off task initiated. Task UUID: {{ power_off_res.json.task_uuid | default('N/A') }}"
 
-    # 3. The 2-minute Wait
+    # 3. The Wait
     - name: Wait for 2 minutes before powering back on
       pause:
         minutes: 2
-      # This will show a countdown in the AWX job log
 
     # 4. Power On the VM
     - name: "API CALL: Power ON VM"
@@ -60,9 +65,13 @@
         password: "{{ nutanix_pass }}"
         force_basic_auth: yes
         validate_certs: false
+        headers:
+          Accept: "application/json"
+          Content-Type: "application/json"
         body_format: json
         body:
           transition: "ON"
+        status_code: [200, 201, 202] # THIS IS THE FIX
       delegate_to: localhost
       register: power_on_res
 
