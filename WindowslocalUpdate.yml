@@ -63,12 +63,13 @@
 
     - name: Create Safety Snapshot
       uri:
-        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots"
+        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/tasks/{{ v2_snap_info.json.task_uuid }}"
         method: POST
         user: "{{ nutanix_user }}"
         password: "{{ nutanix_pass }}"
         force_basic_auth: yes
         validate_certs: false
+        status_code: [200, 201, 202]
         body:
           snapshot_specs:
             - vm_uuid: "{{ ntnx_uuid }}"
