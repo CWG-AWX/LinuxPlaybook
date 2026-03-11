@@ -1,5 +1,5 @@
 ---
-- name: Windows Security Patching with Service Mapping & Recovery
+- name: Windows Security Patching with Direct API Recovery
   hosts: all
   gather_facts: yes
   
@@ -34,7 +34,6 @@
         password: "{{ nutanix_pass | string }}"
         force_basic_auth: yes
         validate_certs: false
-        return_content: yes
       delegate_to: localhost
       register: vm_search
 
@@ -71,7 +70,6 @@
         force_basic_auth: yes
         validate_certs: false
         body_format: json
-        status_code: [200, 201, 202]
         body:
           snapshot_specs:
             - vm_uuid: "{{ ntnx_uuid }}"
@@ -127,13 +125,17 @@
             post_port_count: "{{ post_audit.stdout.split(',') | length }}"
 
       rescue:
-        - name: "RECOVERY: Shutdown Affected Instance"
-          nutanix.ncp.ntnx_vms:
-            nutanix_host: "{{ nutanix_host }}"
-            nutanix_username: "{{ nutanix_user }}"
-            nutanix_password: "{{ nutanix_pass }}"
-            state: "power_off"
-            vm_uuid: "{{ ntnx_uuid }}"
+        - name: "RECOVERY: API Power Off"
+          uri:
+            url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/{{ ntnx_uuid }}/set_power_state"
+            method: POST
+            user: "{{ nutanix_user | string }}"
+            password: "{{ nutanix_pass | string }}"
+            force_basic_auth: yes
+            validate_certs: false
+            body_format: json
+            body:
+              transition: "OFF"
           delegate_to: localhost
 
         - name: "RECOVERY: Restore System"
@@ -147,22 +149,21 @@
             body: {}
           delegate_to: localhost
 
-        - name: "RECOVERY: Power On"
-          nutanix.ncp.ntnx_vms:
-            nutanix_host: "{{ nutanix_host }}"
-            nutanix_username: "{{ nutanix_user }}"
-            nutanix_password: "{{ nutanix_pass }}"
-            state: "power_on"
-            vm_uuid: "{{ ntnx_uuid }}"
+        - name: "RECOVERY: API Power On"
+          uri:
+            url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/{{ ntnx_uuid }}/set_power_state"
+            method: POST
+            user: "{{ nutanix_user | string }}"
+            password: "{{ nutanix_pass | string }}"
+            force_basic_auth: yes
+            validate_certs: false
+            body_format: json
+            body:
+              transition: "ON"
           delegate_to: localhost
 
-        - name: Set Failure Facts
-          set_fact:
-            patch_status: "FAILED - ROLLED BACK"
-            post_port_count: "0 (Reverted)"
-
     # ============================================================
-    # PHASE 3: AUDIT REPORTING & EMAIL
+    # PHASE 3: REPORTING & EMAIL
     # ============================================================
     - name: Create CSV Header
       run_once: true
@@ -193,17 +194,21 @@
         attach: "{{ report_file }}"
 
     # ============================================================
-    # PHASE 4: MANUAL ROLLBACK TEST
+    # PHASE 4: MANUAL ROLLBACK TEST (Triggered via -e verify_rollback_test=true)
     # ============================================================
     - name: "TESTING: Verify Rollback Mechanism"
       block:
-        - name: Shutdown for Restore Test
-          nutanix.ncp.ntnx_vms:
-            nutanix_host: "{{ nutanix_host }}"
-            nutanix_username: "{{ nutanix_user }}"
-            nutanix_password: "{{ nutanix_pass }}"
-            state: "power_off"
-            vm_uuid: "{{ ntnx_uuid }}"
+        - name: Shutdown for Restore Test (API Call)
+          uri:
+            url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/{{ ntnx_uuid }}/set_power_state"
+            method: POST
+            user: "{{ nutanix_user | string }}"
+            password: "{{ nutanix_pass | string }}"
+            force_basic_auth: yes
+            validate_certs: false
+            body_format: json
+            body:
+              transition: "OFF"
           delegate_to: localhost
 
         - name: Restore from Pre-Patch Snapshot
@@ -217,12 +222,16 @@
             body: {}
           delegate_to: localhost
 
-        - name: Power On After Restore
-          nutanix.ncp.ntnx_vms:
-            nutanix_host: "{{ nutanix_host }}"
-            nutanix_username: "{{ nutanix_user }}"
-            nutanix_password: "{{ nutanix_pass }}"
-            state: "power_on"
-            vm_uuid: "{{ ntnx_uuid }}"
+        - name: Power On After Restore (API Call)
+          uri:
+            url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/{{ ntnx_uuid }}/set_power_state"
+            method: POST
+            user: "{{ nutanix_user | string }}"
+            password: "{{ nutanix_pass | string }}"
+            force_basic_auth: yes
+            validate_certs: false
+            body_format: json
+            body:
+              transition: "ON"
           delegate_to: localhost
       when: verify_rollback_test | default(true) | bool
