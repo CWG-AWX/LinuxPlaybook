@@ -24,7 +24,7 @@
 
   tasks:
     # ============================================================
-    # PHASE 1: PRE-PATCH AUDIT
+    # PHASE 1: PRE-PATCH AUDIT & SNAPSHOT
     # ============================================================
     - name: Get VM UUID via Direct API
       uri:
@@ -61,7 +61,7 @@
       debug:
         msg: "LISTENING BEFORE PATCH: {{ pre_services }}"
 
-    - name: Create Safety Snapshot
+    - name: Create Safety Snapshot (Direct API)
       uri:
         url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots"
         method: POST
@@ -163,7 +163,7 @@
           delegate_to: localhost
 
     # ============================================================
-    # PHASE 3: REPORTING & EMAIL
+    # PHASE 3: AUDIT REPORTING & EMAIL
     # ============================================================
     - name: Create CSV Header
       run_once: true
