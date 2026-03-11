@@ -1,0 +1,41 @@
+---
+- name: Install Checkmk Agent on Windows Servers
+  hosts: all
+  gather_facts: no
+  vars:
+    # --- PATCH FILE CONFIG ---
+    src_patch: "check_mk_agent.msi"
+    remote_temp_dir: "C:\\Windows\\Temp"
+    remote_patch_path: "{{ remote_temp_dir }}\\check_mk_agent.msi"
+    
+  # Escalation settings for Admin installation
+  become: yes
+  become_method: runas
+  become_user: ansible_svc
+
+  tasks:
+    - name: Ensure temp directory exists
+      ansible.windows.win_file:
+        path: "{{ remote_temp_dir }}"
+        state: directory
+
+    - name: Copy Checkmk MSI to Windows Server
+      ansible.windows.win_copy:
+        src: "{{ src_patch }}"
+        dest: "{{ remote_patch_path }}"
+
+    - name: Install Checkmk Agent via MSI
+      ansible.windows.win_package:
+        path: "{{ remote_patch_path }}"
+        state: present
+        arguments: '/qn /norestart'
+      register: install_result
+
+    - name: Verify Installation Status
+      ansible.builtin.debug:
+        var: install_result
+
+    - name: Cleanup Installation File
+      ansible.windows.win_file:
+        path: "{{ remote_patch_path }}"
+        state: absent
