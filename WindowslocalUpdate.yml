@@ -24,7 +24,7 @@
 
   tasks:
     # ============================================================
-    # PHASE 1: PRE-PATCH AUDIT
+    # PHASE 1: PRE-PATCH AUDIT & SNAPSHOT CREATION
     # ============================================================
     - name: Get VM UUID
       uri:
@@ -34,6 +34,8 @@
         password: "{{ nutanix_pass }}"
         force_basic_auth: yes
         validate_certs: false
+        headers:
+          Accept: "application/json"
       delegate_to: localhost
       register: vm_search
 
@@ -48,7 +50,7 @@
         Write-Output "$(($map | Sort-Object -Unique) -join ',');$($lastKB.HotFixID)"
       register: pre_audit_raw
 
-    - name: Set System Facts
+    - name: Set Initial System Facts
       set_fact:
         ntnx_uuid: "{{ vm_search.json.entities[0].uuid }}"
         pre_services: "{{ pre_audit_raw.stdout.split(';')[0] }}"
@@ -61,7 +63,7 @@
       debug:
         msg: "LISTENING BEFORE PATCH: {{ pre_services }}"
 
-    - name: Create Safety Snapshot
+    - name: Create Safety Snapshot (v2 API)
       uri:
         url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots"
         method: POST
@@ -69,11 +71,37 @@
         password: "{{ nutanix_pass }}"
         force_basic_auth: yes
         validate_certs: false
+        headers:
+          Accept: "application/json"
+          Content-Type: "application/json"
         body_format: json
         body:
           snapshot_specs: [{ "vm_uuid": "{{ ntnx_uuid }}", "snapshot_name": "{{ snap_name }}" }]
+        status_code: [200, 201, 202]
       delegate_to: localhost
       register: v2_snap_info
+
+    - name: "POLL: Wait for Snapshot Task to Complete"
+      uri:
+        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/tasks/{{ v2_snap_info.json.task_uuid }}"
+        method: GET
+        user: "{{ nutanix_user }}"
+        password: "{{ nutanix_pass }}"
+        force_basic_auth: yes
+        validate_certs: false
+        headers:
+          Accept: "application/json"
+      delegate_to: localhost
+      register: snap_task_status
+      until: snap_task_status.json.progress_status == 'Succeeded'
+      retries: 20
+      delay: 15
+
+    - name: "EXTRACT: Save True Snapshot UUID"
+      set_fact:
+        snapshot_uuid: "{{ item.entity_id }}"
+      loop: "{{ snap_task_status.json.entity_list }}"
+      when: "'snapshot' in item.entity_type | lower"
 
     # ============================================================
     # PHASE 2: INSTALL & POST-PATCH VALIDATION
@@ -122,6 +150,9 @@
             patch_status: "Success"
             post_port_count: "{{ post_audit.stdout.split(',') | length }}"
 
+      # ============================================================
+      # PHASE 3: BULLETPROOF ROLLBACK & RE-VALIDATION
+      # ============================================================
       rescue:
         - name: "RECOVERY: API Power Off"
           uri:
@@ -131,20 +162,36 @@
             password: "{{ nutanix_pass }}"
             force_basic_auth: yes
             validate_certs: false
+            headers:
+              Accept: "application/json"
+              Content-Type: "application/json"
             body_format: json
             body: { "transition": "OFF" }
+            status_code: [200, 201, 202]
           delegate_to: localhost
 
-        - name: "RECOVERY: Restore System"
+        - name: Wait for Power Off
+          pause: minutes=1
+
+        - name: "RECOVERY: Restore System from Extracted Snapshot (v3 API)"
           uri:
-            url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots/{{ v2_snap_info.json.task_uuid }}/restore"
+            url: "https://{{ nutanix_host }}:9440/api/nutanix/v3/vms/{{ ntnx_uuid }}/revert"
             method: POST
             user: "{{ nutanix_user }}"
             password: "{{ nutanix_pass }}"
             force_basic_auth: yes
             validate_certs: false
-            body: {}
+            headers:
+              Accept: "application/json"
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              vm_recovery_point_uuid: "{{ snapshot_uuid }}"
+            status_code: [200, 201, 202]
           delegate_to: localhost
+
+        - name: Wait for Restore
+          pause: minutes=1
 
         - name: "RECOVERY: API Power On"
           uri:
@@ -154,12 +201,41 @@
             password: "{{ nutanix_pass }}"
             force_basic_auth: yes
             validate_certs: false
+            headers:
+              Accept: "application/json"
+              Content-Type: "application/json"
             body_format: json
             body: { "transition": "ON" }
+            status_code: [200, 201, 202]
           delegate_to: localhost
 
+        - name: "RECOVERY: Wait for System to Boot"
+          wait_for_connection:
+            delay: 30
+            timeout: 600
+
+        - name: "RECOVERY VALIDATION: Verify Pre-Patch Services"
+          win_shell: |
+            $pre = "{{ pre_services }}".Split(',')
+            $post_conns = Get-NetTCPConnection -State Listen
+            $post_map = foreach ($c in $post_conns) {
+                $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
+                "$($c.LocalPort):$($p.Name)"
+            }
+            foreach ($s in $pre) { if ($s -and ($s -notin $post_map)) { exit 1 } }
+            Write-Output "$(($post_map | Sort-Object -Unique) -join ',')"
+          register: rollback_audit
+          retries: 10
+          delay: 30
+          until: rollback_audit.rc == 0
+
+        - name: Update Status Flags for Reporting
+          set_fact:
+            patch_status: "FAILED - ROLLED BACK & VERIFIED"
+            post_port_count: "{{ rollback_audit.stdout.split(',') | length }} (Restored)"
+
     # ============================================================
-    # PHASE 3: AUDIT REPORTING & EMAIL
+    # PHASE 4: AUDIT REPORTING & EMAIL
     # ============================================================
     - name: Create CSV Header
       run_once: true
@@ -188,44 +264,3 @@
         subject: "PROD WINDOWS AUDIT: Patch Cycle Complete"
         body: "Attached is the port count audit for the current cycle."
         attach: "{{ report_file }}"
-
-    # ============================================================
-    # PHASE 4: MANUAL ROLLBACK TEST
-    # ============================================================
-    - name: "TESTING: Verify Rollback Mechanism"
-      block:
-        - name: Shutdown for Restore Test
-          uri:
-            url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/{{ ntnx_uuid }}/set_power_state"
-            method: POST
-            user: "{{ nutanix_user }}"
-            password: "{{ nutanix_pass }}"
-            force_basic_auth: yes
-            validate_certs: false
-            body_format: json
-            body: { "transition": "OFF" }
-          delegate_to: localhost
-
-        - name: Restore from Pre-Patch Snapshot
-          uri:
-            url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots/{{ v2_snap_info.json.task_uuid }}/restore"
-            method: POST
-            user: "{{ nutanix_user }}"
-            password: "{{ nutanix_pass }}"
-            force_basic_auth: yes
-            validate_certs: false
-            body: {}
-          delegate_to: localhost
-
-        - name: Power On After Restore
-          uri:
-            url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/{{ ntnx_uuid }}/set_power_state"
-            method: POST
-            user: "{{ nutanix_user }}"
-            password: "{{ nutanix_pass }}"
-            force_basic_auth: yes
-            validate_certs: false
-            body_format: json
-            body: { "transition": "ON" }
-          delegate_to: localhost
-      when: verify_rollback_test | default(true) | bool
