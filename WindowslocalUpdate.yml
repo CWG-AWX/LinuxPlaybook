@@ -1,12 +1,13 @@
 ---
-- name: Windows Multi-Host Security Patching & Audit Reporting (Nutanix v2.0 Integrated)
+- name: Windows Multi-Host Security Patching (Nutanix v2.0 API & Audit Version)
   hosts: all
   gather_facts: yes
   
   vars:
     # --- PATCH FILE CONFIG ---
     src_patch: "/mnt/updates/windows/windows10.0-kb5075906-x64_96e7590a40fbfde94dd84e3ed743ccd735f54654.msu"
-    remote_patch_path: "C:/Windows/Temp/patch_install.msu"
+    remote_temp_dir: "C:/Windows/Temp"
+    remote_patch_path: "{{ remote_temp_dir }}/patch_install.msu"
     
     # --- NUTANIX CONFIG ---
     nutanix_host: "10.20.24.5" 
@@ -14,13 +15,12 @@
     nutanix_pass: "Oba@2024"
     snap_name: "PrePatch_{{ inventory_hostname | replace('.', '_') }}_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}"
 
-    # --- REPORTING & SMTP CONFIG (Updated from your snippet) ---
+    # --- REPORTING & SMTP ---
     report_file: "/tmp/windows_patch_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
-    email_recipient: "blaizymike@gmail.com"
+    email_recipient: "abdullateef.adekogbe@cwg-plc.com"
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
-    # Note: password is pulled from your vault_smtp_password variable in the mail task
 
   tasks:
     # ============================================================
@@ -63,7 +63,7 @@
 
     - name: Set VM UUID Fact
       set_fact:
-        ntnx_uuid: "{{ (vm_details.response.entities[0].metadata.uuid) if vm_details.response is defined else (vm_details.entities[0].metadata.uuid) }}"
+        ntnx_uuid: "{{ (vm_details.response.entities[0].metadata.uuid) if (vm_details.response is defined and vm_details.response.entities | length > 0) else (vm_details.entities[0].metadata.uuid) }}"
 
     # ============================================================
     # 2. NUTANIX SNAPSHOT (v2.0 API)
@@ -95,13 +95,12 @@
       delegate_to: localhost
       register: v2_task_status
       until: "v2_task_status.json.progress_status == 'Succeeded'"
-      retries: 15
+      retries: 20
       delay: 10
 
     # ============================================================
     # 3. INSTALLATION & VALIDATION BLOCK
     # ============================================================
-    
     - name: Main Patching Logic
       block:
         - name: Copy patch to Windows server
@@ -109,11 +108,13 @@
             src: "{{ src_patch }}"
             dest: "{{ remote_patch_path }}"
 
-        - name: Install .msu patch (Using forward slashes to avoid Error 123)
-          win_command: wusa.exe {{ remote_patch_path }} /quiet /norestart
+        - name: Execute WUSA Installation (with Become for RC 5 Fix)
+          win_command: "wusa.exe {{ remote_patch_path }} /quiet /norestart"
           become: yes
           become_method: runas
           become_user: ansible_svc
+          async: 3600
+          poll: 30
           register: install_result
           failed_when: "install_result.rc not in [0, 3010, 2359302, 17021]"
 
@@ -133,7 +134,7 @@
             reboot_status: "Reboot Completed"
           when: reboot_result is defined and reboot_result.rebooted | default(false)
 
-        - name: Capture new patch date (Post-Audit)
+        - name: Capture new patch date (Audit)
           win_shell: |
             $patch = Get-HotFix -Id "{{ kb_number }}" -ErrorAction SilentlyContinue
             if ($patch) { $patch.InstalledOn }
@@ -158,7 +159,7 @@
             vm_uuid: "{{ ntnx_uuid }}"
           delegate_to: localhost
 
-        - name: Restore Snapshot (v2.0 API)
+        - name: Revert to Snapshot (v2.0 API Fix)
           uri:
             url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots/{{ v2_snap_info.json.snapshot_results[0].snapshot_uuid }}/restore"
             method: POST
@@ -168,6 +169,7 @@
             validate_certs: false
             body: {}
           delegate_to: localhost
+          when: v2_snap_info.json.snapshot_results is defined
 
         - name: Power On VM
           nutanix.ncp.ntnx_vms:
@@ -178,6 +180,11 @@
             state: "power_on"
             vm_uuid: "{{ ntnx_uuid }}"
           delegate_to: localhost
+
+        - name: Wait for WinRM Recovery
+          wait_for_connection:
+            delay: 30
+            timeout: 600
 
         - name: Mark Failure
           set_fact:
@@ -192,7 +199,7 @@
         state: absent
       ignore_errors: yes
 
-    - name: Create CSV Header (Merged columns)
+    - name: Create CSV Header
       run_once: true
       delegate_to: localhost
       copy:
@@ -217,5 +224,5 @@
         secure: starttls
         to: "{{ email_recipient }}"
         subject: "PROD WINDOWS AUDIT: Patching Report Complete"
-        body: "Windows patching cycle for {{ kb_number | upper }} complete. See attached report."
+        body: "Windows patching cycle complete. See attached report."
         attach: "{{ report_file }}"
