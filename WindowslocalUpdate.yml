@@ -17,7 +17,7 @@
 
     # --- REPORTING & SMTP ---
     report_file: "/tmp/windows_patch_audit_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
-    email_recipient: "abdullateef.adekogbe@cwg-plc.com"
+    email_recipient: "blaizymike@gmail.com"
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     smtp_user: "ignioservices@gmail.com"
@@ -225,4 +225,4 @@
             state: "power_on"
             vm_uuid: "{{ ntnx_uuid }}"
           delegate_to: localhost
-      when: verify_rollback_test | default(false) | bool
+      when: verify_rollback_test | default(true) | bool
