@@ -63,7 +63,7 @@
 
     - name: Create Safety Snapshot
       uri:
-        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/tasks/{{ v2_snap_info.json.task_uuid }}"
+        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots"
         method: POST
         user: "{{ nutanix_user }}"
         password: "{{ nutanix_pass }}"
