@@ -1,266 +1,43 @@
 ---
-- name: Windows Security Patching with Direct API Recovery
+- name: Install Checkmk Agent from Mounted Storage
   hosts: all
-  gather_facts: yes
-  
+  gather_facts: no
   vars:
-    # --- PATCH FILE CONFIG ---
-    src_patch: "/mnt/updates/windows/windows10.0-kb5075906-x64_96e7590a40fbfde94dd84e3ed743ccd735f54654.msu"
+    # --- UPDATED PATH CONFIG ---
+    # Using the mount point path as seen in your Windows Update configuration
+    src_patch: "/mnt/updates/check_mk_agent.msi"
     remote_temp_dir: "C:\\Windows\\Temp"
-    remote_patch_path: "{{ remote_temp_dir }}\\patch_install.msu"
+    remote_patch_path: "{{ remote_temp_dir }}\\check_mk_agent.msi"
     
-    # --- NUTANIX CONFIG ---
-    nutanix_host: "10.20.24.5" 
-    nutanix_user: "michael" 
-    nutanix_pass: "Oba@2024"
-    snap_name: "PrePatch_{{ inventory_hostname | replace('.', '_') }}_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}"
-
-    # --- REPORTING & SMTP ---
-    report_file: "/tmp/windows_patch_audit_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
-    email_recipient: "michael.obateru@cwg-plc.com"
-    smtp_server: "smtp.gmail.com"
-    smtp_port: 587
-    smtp_user: "ignioservices@gmail.com"
+  # Escalation settings for Admin installation
+  become: yes
+  become_method: runas
+  become_user: ansible_svc
 
   tasks:
-    # ============================================================
-    # PHASE 1: PRE-PATCH AUDIT & SNAPSHOT CREATION
-    # ============================================================
-    - name: Get VM UUID
-      uri:
-        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/?filter=vm_name%3D%3D{{ inventory_hostname }}"
-        method: GET
-        user: "{{ nutanix_user }}"
-        password: "{{ nutanix_pass }}"
-        force_basic_auth: yes
-        validate_certs: false
-        headers:
-          Accept: "application/json"
-      delegate_to: localhost
-      register: vm_search
+    - name: Ensure temp directory exists on Windows
+      ansible.windows.win_file:
+        path: "{{ remote_temp_dir }}"
+        state: directory
 
-    - name: Capture Pre-Patch Ports and Services
-      win_shell: |
-        $conns = Get-NetTCPConnection -State Listen
-        $map = foreach ($c in $conns) {
-            $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
-            "$($c.LocalPort):$($p.Name)"
-        }
-        $lastKB = Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 1
-        Write-Output "$(($map | Sort-Object -Unique) -join ',');$($lastKB.HotFixID)"
-      register: pre_audit_raw
+    - name: Copy Checkmk MSI from Controller Mount to Windows Server
+      ansible.windows.win_copy:
+        src: "{{ src_patch }}"
+        dest: "{{ remote_patch_path }}"
+      register: copy_status
 
-    - name: Set Initial System Facts
-      set_fact:
-        ntnx_uuid: "{{ vm_search.json.entities[0].uuid }}"
-        pre_services: "{{ pre_audit_raw.stdout.split(';')[0] }}"
-        pre_port_count: "{{ pre_audit_raw.stdout.split(';')[0].split(',') | length }}"
-        prev_kb: "{{ pre_audit_raw.stdout.split(';')[1] | default('N/A') }}"
-        target_kb: "{{ src_patch | regex_search('kb[0-9]+', ignorecase=True) | default('KB5075906') | upper }}"
-        patch_status: "Pending"
+    - name: Install Checkmk Agent via MSI
+      ansible.windows.win_package:
+        path: "{{ remote_patch_path }}"
+        state: present
+        arguments: '/qn /norestart'
+      register: install_result
 
-    - name: "DISPLAY: Pre-Patch Service Inventory"
-      debug:
-        msg: "LISTENING BEFORE PATCH: {{ pre_services }}"
+    - name: Verify Installation Status
+      ansible.builtin.debug:
+        var: install_result
 
-    - name: Create Safety Snapshot (v2 API)
-      uri:
-        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots"
-        method: POST
-        user: "{{ nutanix_user }}"
-        password: "{{ nutanix_pass }}"
-        force_basic_auth: yes
-        validate_certs: false
-        headers:
-          Accept: "application/json"
-          Content-Type: "application/json"
-        body_format: json
-        body:
-          snapshot_specs: [{ "vm_uuid": "{{ ntnx_uuid }}", "snapshot_name": "{{ snap_name }}" }]
-        status_code: [200, 201, 202]
-      delegate_to: localhost
-      register: v2_snap_info
-
-    - name: "POLL: Wait for Snapshot Task to Complete"
-      uri:
-        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/tasks/{{ v2_snap_info.json.task_uuid }}"
-        method: GET
-        user: "{{ nutanix_user }}"
-        password: "{{ nutanix_pass }}"
-        force_basic_auth: yes
-        validate_certs: false
-        headers:
-          Accept: "application/json"
-      delegate_to: localhost
-      register: snap_task_status
-      until: snap_task_status.json.progress_status == 'Succeeded'
-      retries: 20
-      delay: 15
-
-    - name: "EXTRACT: Save True Snapshot UUID"
-      set_fact:
-        snapshot_uuid: "{{ item.entity_id }}"
-      loop: "{{ snap_task_status.json.entity_list }}"
-      when: "'snapshot' in item.entity_type | lower"
-
-    # ============================================================
-    # PHASE 2: INSTALL & POST-PATCH VALIDATION
-    # ============================================================
-    - name: Execution Block
-      block:
-        - name: Copy and Install Patch
-          win_copy:
-            src: "{{ src_patch }}"
-            dest: "{{ remote_patch_path }}"
-
-        - name: Run WUSA Installer
-          win_command: "wusa.exe {{ remote_patch_path }} /quiet /norestart"
-          become: yes
-          become_method: runas
-          become_user: Administrator
-          register: install_result
-          failed_when: "install_result.rc not in [0, 3010, 2359302]"
-
-        - name: Handle Reboot
-          win_reboot:
-            reboot_timeout: 1200
-          when: install_result.rc == 3010
-
-        - name: Post-Patch Validation (Rollback Trigger)
-          win_shell: |
-            $pre = "{{ pre_services }}".Split(',')
-            $post_conns = Get-NetTCPConnection -State Listen
-            $post_map = foreach ($c in $post_conns) {
-                $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
-                "$($c.LocalPort):$($p.Name)"
-            }
-            foreach ($s in $pre) { if ($s -and ($s -notin $post_map)) { exit 1 } }
-            Write-Output "$(($post_map | Sort-Object -Unique) -join ',')"
-          register: post_audit
-          retries: 15
-          delay: 30
-          until: post_audit.rc == 0
-
-        - name: "DISPLAY: Post-Patch Service Inventory"
-          debug:
-            msg: "LISTENING AFTER PATCH: {{ post_audit.stdout }}"
-
-        - name: Confirm Success
-          set_fact:
-            patch_status: "Success"
-            post_port_count: "{{ post_audit.stdout.split(',') | length }}"
-
-      # ============================================================
-      # PHASE 3: BULLETPROOF ROLLBACK & RE-VALIDATION
-      # ============================================================
-      rescue:
-        - name: "RECOVERY: API Power Off"
-          uri:
-            url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/{{ ntnx_uuid }}/set_power_state"
-            method: POST
-            user: "{{ nutanix_user }}"
-            password: "{{ nutanix_pass }}"
-            force_basic_auth: yes
-            validate_certs: false
-            headers:
-              Accept: "application/json"
-              Content-Type: "application/json"
-            body_format: json
-            body: { "transition": "OFF" }
-            status_code: [200, 201, 202]
-          delegate_to: localhost
-
-        - name: Wait for Power Off
-          pause: minutes=1
-
-        - name: "RECOVERY: Restore System from Extracted Snapshot (v3 API)"
-          uri:
-            url: "https://{{ nutanix_host }}:9440/api/nutanix/v3/vms/{{ ntnx_uuid }}/revert"
-            method: POST
-            user: "{{ nutanix_user }}"
-            password: "{{ nutanix_pass }}"
-            force_basic_auth: yes
-            validate_certs: false
-            headers:
-              Accept: "application/json"
-              Content-Type: "application/json"
-            body_format: json
-            body:
-              vm_recovery_point_uuid: "{{ snapshot_uuid }}"
-            status_code: [200, 201, 202]
-          delegate_to: localhost
-
-        - name: Wait for Restore
-          pause: minutes=1
-
-        - name: "RECOVERY: API Power On"
-          uri:
-            url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/{{ ntnx_uuid }}/set_power_state"
-            method: POST
-            user: "{{ nutanix_user }}"
-            password: "{{ nutanix_pass }}"
-            force_basic_auth: yes
-            validate_certs: false
-            headers:
-              Accept: "application/json"
-              Content-Type: "application/json"
-            body_format: json
-            body: { "transition": "ON" }
-            status_code: [200, 201, 202]
-          delegate_to: localhost
-
-        - name: "RECOVERY: Wait for System to Boot"
-          wait_for_connection:
-            delay: 30
-            timeout: 600
-
-        - name: "RECOVERY VALIDATION: Verify Pre-Patch Services"
-          win_shell: |
-            $pre = "{{ pre_services }}".Split(',')
-            $post_conns = Get-NetTCPConnection -State Listen
-            $post_map = foreach ($c in $post_conns) {
-                $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
-                "$($c.LocalPort):$($p.Name)"
-            }
-            foreach ($s in $pre) { if ($s -and ($s -notin $post_map)) { exit 1 } }
-            Write-Output "$(($post_map | Sort-Object -Unique) -join ',')"
-          register: rollback_audit
-          retries: 10
-          delay: 30
-          until: rollback_audit.rc == 0
-
-        - name: Update Status Flags for Reporting
-          set_fact:
-            patch_status: "FAILED - ROLLED BACK & VERIFIED"
-            post_port_count: "{{ rollback_audit.stdout.split(',') | length }} (Restored)"
-
-    # ============================================================
-    # PHASE 4: AUDIT REPORTING & EMAIL
-    # ============================================================
-    - name: Create CSV Header
-      run_once: true
-      delegate_to: localhost
-      copy:
-        dest: "{{ report_file }}"
-        content: "\"Hostname\",\"Prev_KB\",\"Target_KB\",\"Status\",\"Pre_Port_Count\",\"Post_Port_Count\",\"Timestamp\"\n"
-
-    - name: Append Audit Results
-      delegate_to: localhost
-      throttle: 1
-      lineinfile:
-        path: "{{ report_file }}"
-        line: "\"{{ inventory_hostname }}\",\"{{ prev_kb }}\",\"{{ target_kb }}\",\"{{ patch_status }}\",\"{{ pre_port_count }}\",\"{{ post_port_count }}\",\"{{ lookup('pipe','date --iso-8601=seconds') }}\""
-
-    - name: Email Audit Report
-      run_once: true
-      delegate_to: localhost
-      community.general.mail:
-        host: "{{ smtp_server }}"
-        port: "{{ smtp_port }}"
-        username: "{{ smtp_user }}"
-        password: "{{ vault_smtp_password }}"
-        secure: starttls
-        to: "{{ email_recipient }}"
-        subject: "PROD WINDOWS AUDIT: Patch Cycle Complete"
-        body: "Attached is the port count audit for the current cycle."
-        attach: "{{ report_file }}"
+    - name: Cleanup Installation File
+      ansible.windows.win_file:
+        path: "{{ remote_patch_path }}"
+        state: absent
