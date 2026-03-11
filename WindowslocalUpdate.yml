@@ -1,5 +1,5 @@
 ---
-- name: Windows Multi-Host Security Patching & Audit (PE v2.0)
+- name: Windows Multi-Host Security Patching & Port Audit (PE v2.0)
   hosts: all
   gather_facts: yes
   
@@ -15,7 +15,7 @@
     nutanix_pass: "Oba@2024"
     snap_name: "PrePatch_{{ inventory_hostname | replace('.', '_') }}_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}"
 
-    # --- REPORTING & SMTP (Using Vault Variable) ---
+    # --- REPORTING & SMTP ---
     report_file: "/tmp/windows_patch_audit_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}.csv"
     email_recipient: "blaizymike@gmail.com"
     smtp_server: "smtp.gmail.com"
@@ -26,7 +26,7 @@
     # ============================================================
     # PHASE 1: PRE-CHECK AUDIT & UUID GATHERING
     # ============================================================
-    - name: Get VM UUID via Direct API (Stability Fix)
+    - name: Get VM UUID via Direct API
       uri:
         url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/?filter=vm_name%3D%3D{{ inventory_hostname }}"
         method: GET
@@ -37,7 +37,7 @@
       delegate_to: localhost
       register: vm_search
 
-    - name: Capture Pre-Patch System State
+    - name: Audit Pre-Patch System State
       win_shell: |
         $ports = Get-NetTCPConnection -State Listen | Select-Object -ExpandProperty LocalPort | Sort-Object -Unique
         $lastKB = Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 1
@@ -52,8 +52,11 @@
         prev_kb_date: "{{ pre_audit_raw.stdout.split(';')[2] | default('N/A') }}"
         target_kb: "{{ src_patch | regex_search('kb[0-9]+', ignorecase=True) | default('KB5075906') | upper }}"
         patch_status: "Pending"
-        reboot_status: "No reboot performed"
         recovery_action: "None"
+
+    - name: "DEBUG: Pre-Patch Listening Ports"
+      debug:
+        msg: "The following ports are LISTENING before patching: {{ pre_ports }}"
 
     - name: Create Safety Snapshot (v2.0)
       uri:
@@ -73,7 +76,7 @@
       register: v2_snap_info
 
     # ============================================================
-    # PHASE 2: INSTALLATION & PORT VALIDATION
+    # PHASE 2: INSTALLATION & POST-PATCH VALIDATION
     # ============================================================
     - name: Main Patching Logic
       block:
@@ -93,23 +96,28 @@
         - name: Handle Reboot
           win_reboot:
             reboot_timeout: 1200
-          register: reboot_result
           when: install_result.rc == 3010
 
-        - name: Post-Patch Port Validation (Retry loop for app startup)
+        - name: Validate Listening Ports (Retrying for startup)
           win_shell: |
             $pre = "{{ pre_ports }}".Split(',')
             $post = Get-NetTCPConnection -State Listen | Select-Object -ExpandProperty LocalPort
             foreach ($p in $pre) { if ($p -and ($p -notin $post)) { exit 1 } }
-          register: port_check
+            # If we reach here, all pre-patch ports are back. Return the list.
+            Write-Output ($post -join ',')
+          register: post_port_check
           retries: 15
           delay: 30
-          until: port_check.rc == 0
+          until: post_port_check.rc == 0
+
+        - name: "DEBUG: Post-Patch Listening Ports"
+          debug:
+            msg: "The following ports are CONFIRMED LISTENING after patching: {{ post_port_check.stdout }}"
 
         - name: Mark Success
           set_fact:
-            patch_status: "Success (Verified)"
-            reboot_status: "{{ 'Rebooted' if (reboot_result.rebooted | default(false)) else 'No Reboot Needed' }}"
+            patch_status: "Success (Ports Verified)"
+            post_ports_csv: "{{ post_port_check.stdout }}"
 
       # ============================================================
       # PHASE 3: RECOVERY PHASE (ROLLBACK)
@@ -148,23 +156,24 @@
           set_fact:
             patch_status: "FAILED"
             recovery_action: "Automatic Rollback (Port Validation Failed)"
+            post_ports_csv: "RECOVERY_MODE"
 
     # ============================================================
-    # PHASE 4: AUDIT REPORTING & SMTP
+    # PHASE 4: REPORTING & SMTP
     # ============================================================
     - name: Create Audit CSV Header
       run_once: true
       delegate_to: localhost
       copy:
         dest: "{{ report_file }}"
-        content: "\"Hostname\",\"Prev_KB\",\"Prev_Date\",\"Target_KB\",\"Status\",\"Reboot\",\"Recovery\",\"Timestamp\"\n"
+        content: "\"Hostname\",\"Prev_KB\",\"Target_KB\",\"Status\",\"Pre_Port_Count\",\"Post_Port_Count\",\"Recovery\",\"Timestamp\"\n"
 
     - name: Append data to CSV
       delegate_to: localhost
       throttle: 1
       lineinfile:
         path: "{{ report_file }}"
-        line: "\"{{ inventory_hostname }}\",\"{{ prev_kb }}\",\"{{ prev_kb_date }}\",\"{{ target_kb }}\",\"{{ patch_status }}\",\"{{ reboot_status }}\",\"{{ recovery_action }}\",\"{{ lookup('pipe','date --iso-8601=seconds') }}\""
+        line: "\"{{ inventory_hostname }}\",\"{{ prev_kb }}\",\"{{ target_kb }}\",\"{{ patch_status }}\",\"{{ pre_ports.split(',') | length }}\",\"{{ post_ports_csv.split(',') | length }}\",\"{{ recovery_action }}\",\"{{ lookup('pipe','date --iso-8601=seconds') }}\""
 
     - name: Email Final Audit Report
       run_once: true
@@ -176,6 +185,6 @@
         password: "{{ vault_smtp_password }}"
         secure: starttls
         to: "{{ email_recipient }}"
-        subject: "PROD WINDOWS AUDIT: Patching and Rollback Cycle Complete"
-        body: "Windows patching cycle complete. Attached is the audit report verifying port states and KB history."
+        subject: "PROD WINDOWS AUDIT: Full Port Validation Complete"
+        body: "Windows patching cycle complete. Ports were verified pre and post-patch to ensure service availability."
         attach: "{{ report_file }}"
