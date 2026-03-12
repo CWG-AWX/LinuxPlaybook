@@ -1,55 +1,23 @@
 ---
-- name: Offline Install Checkmk Agent - Ubuntu and Rhel
-  hosts: all
-  become: yes
-  vars:
-    agent_filename: "check-mk-agent_2.4.0p20-1_all.deb"
-
+- name: Deploy Checkmk Password Expiry Script to Windows
+  hosts: windows_servers
   tasks:
-    - name: Copy Checkmk agent to the server
-      copy:
-        src: "{{ agent_filename }}"
-        dest: "/tmp/{{ agent_filename }}"
-        mode: '0644'
+    - name: Ensure Checkmk local directory exists
+      ansible.windows.win_file:
+        path: C:\ProgramData\checkmk\agent\local
+        state: directory
 
-    - name: Install package (Offline Mode)
-      apt:
-        deb: "/tmp/{{ agent_filename }}"
-        state: present
-        update_cache: no
-
-    - name: Verify installation status
-      command: dpkg-query -W -f='${Status}' check-mk-agent
-      register: pkg_check
-      failed_when: "'install ok installed' not in pkg_check.stdout"
-      changed_when: false
-
-    #- name: Install package (Offline Mode)
-      #dnf:
-        #name: "/tmp/{{ agent_filename }}"
-        #state: present
-        #disable_gpg_check: yes
-
-    #- name: Verify installation status
-      #command: rpm -q check-mk-agent
-      #register: pkg_check
-      #failed_when: pkg_check.rc != 0
-      #changed_when: false 
-
-    - name: Ensure Checkmk socket is enabled
-      systemd:
-        name: check-mk-agent.socket
-        enabled: yes
-        state: started
-      ignore_errors: yes
-
-    - name: Cleanup temporary file
-      file:
-        path: "/tmp/{{ agent_filename }}"
-        state: absent
-
-    - name: Final Check - Run agent locally
-      command: check_mk_agent
-      register: agent_run
-      failed_when: agent_run.stdout == ""
-      changed_when: false
+    - name: Deploy Password Expiry PowerShell Script
+      ansible.windows.win_copy:
+        dest: C:\ProgramData\checkmk\agent\local\check_password_expiry.ps1
+        content: |
+          $WarningDays = 7
+          $CriticalDays = 0
+          $users = Get-LocalUser | Where-Object { $_.Enabled -eq $true -and $_.PasswordExpires -ne $null }
+          foreach ($user in $users) {
+              $daysLeft = ($user.PasswordExpires - (Get-Date)).Days
+              if ($daysLeft -le $CriticalDays) { $state = 2; $statusText = "CRITICAL" }
+              elseif ($daysLeft -le $WarningDays) { $state = 1; $statusText = "WARNING" }
+              else { $state = 0; $statusText = "OK" }
+              "{0} PasswordExpiry_{1} days_left={2} {3}: Password for {1} expires in {2} days" -f $state, $user.Name, $daysLeft, $statusText
+          }
