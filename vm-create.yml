@@ -1,0 +1,114 @@
+---
+- name: Build Robust Windows 2022 VM
+  hosts: localhost
+  gather_facts: false
+  vars:
+    # --- AUTHENTICATION ---
+    nutanix_host: "10.20.24.111"
+    nutanix_user: "michael"
+    nutanix_pass: "Obateru@123"
+
+    # --- INFRASTRUCTURE ---
+    cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
+    subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f" # NKP-VLAN
+    
+    # --- IMAGES ---
+    win_2022_iso: "b3772959-af75-4d6c-9125-f5c941c0dd78"
+    virtio_iso: "4e5b6677-e2e2-4786-85f2-fe5e78d999bf"
+    
+    # --- VM SPECS ---
+    vm_name: "WIN-2022-SRE-PROD"
+    vcpus: 2
+    memory_gb: 8
+    disk_size_gb: 500
+
+  tasks:
+    - name: Deploy VM with Sysprep and Static Networking
+      nutanix.ncp.ntnx_vms:
+        nutanix_host: "{{ nutanix_host }}"
+        nutanix_username: "{{ nutanix_user }}"
+        nutanix_password: "{{ nutanix_pass }}"
+        validate_certs: false
+        state: present
+        power_state: "on"
+        name: "{{ vm_name }}"
+        cluster_uuid: "{{ cluster_uuid }}"
+        num_vcpus_per_socket: 1
+        num_sockets: "{{ vcpus }}"
+        memory_size_mib: "{{ memory_gb * 1024 }}"
+        boot_type: "UEFI"
+        
+        nics:
+          - subnet_uuid: "{{ subnet_uuid }}"
+        
+        disks:
+          - device_bus: "SATA"
+            device_type: "CDROM"
+            clone_from_image_uuid: "{{ win_2022_iso }}"
+          - device_bus: "SATA"
+            device_type: "CDROM"
+            clone_from_image_uuid: "{{ virtio_iso }}"
+          - device_bus: "VIRTIO"
+            device_type: "DISK"
+            disk_size_mib: "{{ disk_size_gb * 1024 }}"
+
+        guest_customization:
+          sysprep:
+            unattend_xml: |
+              <?xml version="1.0" encoding="utf-8"?>
+              <unattend xmlns="urn:schemas-microsoft-com:unattend">
+                <settings pass="specialize">
+                  <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+                    <TimeZone>W. Central Africa Standard Time</TimeZone>
+                  </component>
+                </settings>
+                <settings pass="oobeSystem">
+                  <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+                    <UserAccounts>
+                      <AdministratorPassword>
+                        <Value>security@123</Value>
+                        <PlainText>true</PlainText>
+                      </AdministratorPassword>
+                    </UserAccounts>
+                    <AutoLogon>
+                      <Password><Value>security@123</Value></Password>
+                      <Enabled>true</Enabled>
+                      <Username>Administrator</Username>
+                    </AutoLogon>
+                    <FirstLogonCommands>
+                      <SynchronousCommand action="add">
+                        <Order>1</Order>
+                        <Description>Custom Prep Script</Description>
+                        <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "
+                          # 1. Create Service Account
+                          $User = 'ansible_svc';
+                          $Pass = ConvertTo-SecureString 'cwg@2026' -AsPlainText -Force;
+                          New-LocalUser -Name $User -Password $Pass -Description 'AWX Account';
+                          Add-LocalGroupMember -Group 'Administrators' -Member $User;
+                          Set-LocalUser -Name $User -PasswordNeverExpires $true;
+
+                          # 2. Static IP Configuration
+                          $NetAdapter = Get-NetAdapter | Where-Object Status -eq 'Up';
+                          New-NetIPAddress -InterfaceIndex $NetAdapter.ifIndex -IPAddress '192.168.41.101' -PrefixLength 24 -DefaultGateway '192.168.41.1';
+                          Set-DnsClientServerAddress -InterfaceIndex $NetAdapter.ifIndex -ServerAddresses ('8.8.8.8','1.1.1.1');
+
+                          # 3. Configure WinRM
+                          winrm quickconfig -q;
+                          Set-Service WinRM -StartupType Automatic;
+                          Enable-PSRemoting -Force;
+                          winrm set winrm/config/service '@{AllowUnencrypted=\"true\"}';
+                          winrm set winrm/config/service/auth '@{Basic=\"true\"}';
+
+                          # 4. Disable Firewall
+                          Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False;
+                        "</CommandLine>
+                      </SynchronousCommand>
+                    </FirstLogonCommands>
+                  </component>
+                </settings>
+              </unattend>
+      register: deploy_status
+
+    - name: Report Deployment
+      debug:
+        msg: "Deployment of {{ vm_name }} has been initiated. Static IP will be set to 192.168.41.101."
