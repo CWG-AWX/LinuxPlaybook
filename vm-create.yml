@@ -22,9 +22,63 @@
     vcpus: 2
     memory_gb: 8
     disk_size_gb: 500
+    
+    # --- TEMP FILE PATH FOR AWX ---
+    sysprep_file_path: "/tmp/unattend.xml"
 
   tasks:
-    - name: Deploy VM with Sysprep and Static Networking
+    - name: Task 1 - Generate sysprep XML file locally on AWX Runner
+      copy:
+        dest: "{{ sysprep_file_path }}"
+        content: |
+          <?xml version="1.0" encoding="utf-8"?>
+          <unattend xmlns="urn:schemas-microsoft-com:unattend">
+            <settings pass="specialize">
+              <component name="Microsoft-Windows-Shell-Setup" language="neutral" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
+                <TimeZone>W. Central Africa Standard Time</TimeZone>
+              </component>
+            </settings>
+            <settings pass="oobeSystem">
+              <component name="Microsoft-Windows-Shell-Setup" language="neutral" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
+                <UserAccounts>
+                  <AdministratorPassword>
+                    <Value>security@123</Value>
+                    <PlainText>true</PlainText>
+                  </AdministratorPassword>
+                </UserAccounts>
+                <AutoLogon>
+                  <Password><Value>security@123</Value></Password>
+                  <Enabled>true</Enabled>
+                  <Username>Administrator</Username>
+                </AutoLogon>
+                <FirstLogonCommands>
+                  <SynchronousCommand action="add">
+                    <Order>1</Order>
+                    <Description>Run Prep Script</Description>
+                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "
+                      $u='ansible_svc';$p=ConvertTo-SecureString 'cwg@2026' -AsPlainText -Force;
+                      if(!(Get-LocalUser -Name $u -ErrorAction SilentlyContinue)){
+                        New-LocalUser -Name $u -Password $p;
+                        Add-LocalGroupMember -Group 'Administrators' -Member $u;
+                      }
+                      Set-LocalUser -Name $u -PasswordNeverExpires $true;
+                      winrm quickconfig -q;
+                      Set-Service WinRM -StartupType Automatic;
+                      Enable-PSRemoting -Force;
+                      winrm set winrm/config/service '@{AllowUnencrypted=\"true\"}';
+                      winrm set winrm/config/service/auth '@{Basic=\"true\"}';
+                      $ni=(Get-NetAdapter | where status -eq 'up').ifIndex;
+                      New-NetIPAddress -InterfaceIndex $ni -IPAddress '192.168.41.101' -PrefixLength 24 -DefaultGateway '192.168.41.1';
+                      Set-DnsClientServerAddress -InterfaceIndex $ni -ServerAddresses ('8.8.8.8','1.1.1.1');
+                      Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False;
+                    "</CommandLine>
+                  </SynchronousCommand>
+                </FirstLogonCommands>
+              </component>
+            </settings>
+          </unattend>
+
+    - name: Task 2 - Deploy VM and pass the XML file
       nutanix.ncp.ntnx_vms:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
@@ -59,61 +113,14 @@
             clone_image:
               uuid: "{{ virtio_iso }}"
 
-        # Refined Guest Customization Block
+        # This is exactly what the module is asking for
         guest_customization:
-          cloud_init: # Some NCP versions use cloud_init as the parent key even for Sysprep
-            sysprep:
-              install_type: "fresh"
-              unattend_xml: |
-                <?xml version="1.0" encoding="utf-8"?>
-                <unattend xmlns="urn:schemas-microsoft-com:unattend">
-                  <settings pass="specialize">
-                    <component name="Microsoft-Windows-Shell-Setup" language="neutral" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
-                      <TimeZone>W. Central Africa Standard Time</TimeZone>
-                    </component>
-                  </settings>
-                  <settings pass="oobeSystem">
-                    <component name="Microsoft-Windows-Shell-Setup" language="neutral" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
-                      <UserAccounts>
-                        <AdministratorPassword>
-                          <Value>security@123</Value>
-                          <PlainText>true</PlainText>
-                        </AdministratorPassword>
-                      </UserAccounts>
-                      <AutoLogon>
-                        <Password><Value>security@123</Value></Password>
-                        <Enabled>true</Enabled>
-                        <Username>Administrator</Username>
-                      </AutoLogon>
-                      <FirstLogonCommands>
-                        <SynchronousCommand action="add">
-                          <Order>1</Order>
-                          <Description>Run Prep Script</Description>
-                          <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "
-                            $u='ansible_svc';$p=ConvertTo-SecureString 'cwg@2026' -AsPlainText -Force;
-                            if(!(Get-LocalUser -Name $u -ErrorAction SilentlyContinue)){
-                              New-LocalUser -Name $u -Password $p;
-                              Add-LocalGroupMember -Group 'Administrators' -Member $u;
-                            }
-                            Set-LocalUser -Name $u -PasswordNeverExpires $true;
-                            winrm quickconfig -q;
-                            Set-Service WinRM -StartupType Automatic;
-                            Enable-PSRemoting -Force;
-                            winrm set winrm/config/service '@{AllowUnencrypted=\"true\"}';
-                            winrm set winrm/config/service/auth '@{Basic=\"true\"}';
-                            $ni=(Get-NetAdapter | where status -eq 'up').ifIndex;
-                            New-NetIPAddress -InterfaceIndex $ni -IPAddress '192.168.41.101' -PrefixLength 24 -DefaultGateway '192.168.41.1';
-                            Set-DnsClientServerAddress -InterfaceIndex $ni -ServerAddresses ('8.8.8.8','1.1.1.1');
-                            Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False;
-                          "</CommandLine>
-                        </SynchronousCommand>
-                      </FirstLogonCommands>
-                    </component>
-                  </settings>
-                </unattend>
+          type: "sysprep"
+          script_path: "{{ sysprep_file_path }}"
+          
       register: deploy_status
 
-    - name: Power On the VM
+    - name: Task 3 - Power On the VM
       nutanix.ncp.ntnx_vms:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
@@ -123,3 +130,12 @@
         name: "{{ vm_name }}"
         power_state: "on"
       when: deploy_status.changed
+
+    - name: Task 4 - Clean up temporary sysprep file
+      file:
+        path: "{{ sysprep_file_path }}"
+        state: absent
+
+    - name: Task 5 - Report Deployment
+      debug:
+        msg: "Deployment of {{ vm_name }} has been initiated. Static IP will configure to 192.168.41.101 upon boot."
