@@ -11,6 +11,7 @@
     # --- INFRASTRUCTURE ---
     cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
     subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f" # NKP-VLAN
+    container_name: "cwg-default-container"
     
     # --- IMAGES ---
     win_2022_iso: "b3772959-af75-4d6c-9125-f5c941c0dd78"
@@ -30,85 +31,99 @@
         nutanix_password: "{{ nutanix_pass }}"
         validate_certs: false
         state: present
-        power_state: "on"
         name: "{{ vm_name }}"
-        cluster_uuid: "{{ cluster_uuid }}"
-        num_vcpus_per_socket: 1
-        num_sockets: "{{ vcpus }}"
-        memory_size_mib: "{{ memory_gb * 1024 }}"
-        boot_type: "UEFI"
+        cluster:
+          uuid: "{{ cluster_uuid }}"
+        num_vcpus: "{{ vcpus }}"
+        num_cores_per_vcpu: 1
+        memory_gb: "{{ memory_gb }}"
+        boot_config:
+          boot_type: "UEFI"
         
-        nics:
-          - subnet_uuid: "{{ subnet_uuid }}"
+        networks:
+          - subnet:
+              uuid: "{{ subnet_uuid }}"
         
         disks:
-          - device_bus: "SATA"
-            device_type: "CDROM"
-            clone_from_image_uuid: "{{ win_2022_iso }}"
-          - device_bus: "SATA"
-            device_type: "CDROM"
-            clone_from_image_uuid: "{{ virtio_iso }}"
-          - device_bus: "VIRTIO"
-            device_type: "DISK"
-            disk_size_mib: "{{ disk_size_gb * 1024 }}"
+          # OS BOOT DISK
+          - type: "DISK"
+            bus: "VIRTIO"
+            size_gb: "{{ disk_size_gb }}"
+            storage_container:
+              name: "{{ container_name }}"
+          # WINDOWS ISO
+          - type: "CDROM"
+            bus: "SATA"
+            clone_image:
+              uuid: "{{ win_2022_iso }}"
+          # VIRTIO ISO (Required for Nutanix Drivers)
+          - type: "CDROM"
+            bus: "SATA"
+            clone_image:
+              uuid: "{{ virtio_iso }}"
 
         guest_customization:
-          sysprep:
-            unattend_xml: |
-              <?xml version="1.0" encoding="utf-8"?>
-              <unattend xmlns="urn:schemas-microsoft-com:unattend">
-                <settings pass="specialize">
-                  <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-                    <TimeZone>W. Central Africa Standard Time</TimeZone>
-                  </component>
-                </settings>
-                <settings pass="oobeSystem">
-                  <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-                    <UserAccounts>
-                      <AdministratorPassword>
-                        <Value>security@123</Value>
-                        <PlainText>true</PlainText>
-                      </AdministratorPassword>
-                    </UserAccounts>
-                    <AutoLogon>
-                      <Password><Value>security@123</Value></Password>
-                      <Enabled>true</Enabled>
-                      <Username>Administrator</Username>
-                    </AutoLogon>
-                    <FirstLogonCommands>
-                      <SynchronousCommand action="add">
-                        <Order>1</Order>
-                        <Description>Custom Prep Script</Description>
-                        <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "
-                          # 1. Create Service Account
-                          $User = 'ansible_svc';
-                          $Pass = ConvertTo-SecureString 'cwg@2026' -AsPlainText -Force;
-                          New-LocalUser -Name $User -Password $Pass -Description 'AWX Account';
-                          Add-LocalGroupMember -Group 'Administrators' -Member $User;
-                          Set-LocalUser -Name $User -PasswordNeverExpires $true;
-
-                          # 2. Static IP Configuration
-                          $NetAdapter = Get-NetAdapter | Where-Object Status -eq 'Up';
-                          New-NetIPAddress -InterfaceIndex $NetAdapter.ifIndex -IPAddress '192.168.41.101' -PrefixLength 24 -DefaultGateway '192.168.41.1';
-                          Set-DnsClientServerAddress -InterfaceIndex $NetAdapter.ifIndex -ServerAddresses ('8.8.8.8','1.1.1.1');
-
-                          # 3. Configure WinRM
-                          winrm quickconfig -q;
-                          Set-Service WinRM -StartupType Automatic;
-                          Enable-PSRemoting -Force;
-                          winrm set winrm/config/service '@{AllowUnencrypted=\"true\"}';
-                          winrm set winrm/config/service/auth '@{Basic=\"true\"}';
-
-                          # 4. Disable Firewall
-                          Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False;
-                        "</CommandLine>
-                      </SynchronousCommand>
-                    </FirstLogonCommands>
-                  </component>
-                </settings>
-              </unattend>
+          type: "sysprep"
+          script: |
+            <?xml version="1.0" encoding="utf-8"?>
+            <unattend xmlns="urn:schemas-microsoft-com:unattend">
+              <settings pass="specialize">
+                <component name="Microsoft-Windows-Shell-Setup" language="neutral" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
+                  <TimeZone>W. Central Africa Standard Time</TimeZone>
+                </component>
+              </settings>
+              <settings pass="oobeSystem">
+                <component name="Microsoft-Windows-Shell-Setup" language="neutral" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
+                  <UserAccounts>
+                    <AdministratorPassword>
+                      <Value>security@123</Value>
+                      <PlainText>true</PlainText>
+                    </AdministratorPassword>
+                  </UserAccounts>
+                  <AutoLogon>
+                    <Password><Value>security@123</Value></Password>
+                    <Enabled>true</Enabled>
+                    <Username>Administrator</Username>
+                  </AutoLogon>
+                  <FirstLogonCommands>
+                    <SynchronousCommand action="add">
+                      <Order>1</Order>
+                      <Description>Run Prep Script</Description>
+                      <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "
+                        $u='ansible_svc';$p=ConvertTo-SecureString 'cwg@2026' -AsPlainText -Force;
+                        if(!(Get-LocalUser -Name $u -ErrorAction SilentlyContinue)){
+                          New-LocalUser -Name $u -Password $p;
+                          Add-LocalGroupMember -Group 'Administrators' -Member $u;
+                        }
+                        Set-LocalUser -Name $u -PasswordNeverExpires $true;
+                        winrm quickconfig -q;
+                        Set-Service WinRM -StartupType Automatic;
+                        Enable-PSRemoting -Force;
+                        winrm set winrm/config/service '@{AllowUnencrypted=\"true\"}';
+                        winrm set winrm/config/service/auth '@{Basic=\"true\"}';
+                        $ni=(Get-NetAdapter | where status -eq 'up').ifIndex;
+                        New-NetIPAddress -InterfaceIndex $ni -IPAddress '192.168.41.101' -PrefixLength 24 -DefaultGateway '192.168.41.1';
+                        Set-DnsClientServerAddress -InterfaceIndex $ni -ServerAddresses ('8.8.8.8','1.1.1.1');
+                        Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False;
+                      "</CommandLine>
+                    </SynchronousCommand>
+                  </FirstLogonCommands>
+                </component>
+              </settings>
+            </unattend>
       register: deploy_status
+
+    - name: Power On the VM
+      nutanix.ncp.ntnx_vms:
+        nutanix_host: "{{ nutanix_host }}"
+        nutanix_username: "{{ nutanix_user }}"
+        nutanix_password: "{{ nutanix_pass }}"
+        validate_certs: false
+        state: present
+        name: "{{ vm_name }}"
+        power_state: "on"
+      when: deploy_status.changed
 
     - name: Report Deployment
       debug:
-        msg: "Deployment of {{ vm_name }} has been initiated. Static IP will be set to 192.168.41.101."
+        msg: "Deployment of {{ vm_name }} has been initiated with IP 192.168.41.101."
