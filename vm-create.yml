@@ -55,23 +55,7 @@
                   <SynchronousCommand action="add">
                     <Order>1</Order>
                     <Description>Run Prep Script</Description>
-                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "
-                      $u='ansible_svc';$p=ConvertTo-SecureString 'cwg@2026' -AsPlainText -Force;
-                      if(!(Get-LocalUser -Name $u -ErrorAction SilentlyContinue)){
-                        New-LocalUser -Name $u -Password $p;
-                        Add-LocalGroupMember -Group 'Administrators' -Member $u;
-                      }
-                      Set-LocalUser -Name $u -PasswordNeverExpires $true;
-                      winrm quickconfig -q;
-                      Set-Service WinRM -StartupType Automatic;
-                      Enable-PSRemoting -Force;
-                      winrm set winrm/config/service '@{AllowUnencrypted=\"true\"}';
-                      winrm set winrm/config/service/auth '@{Basic=\"true\"}';
-                      $ni=(Get-NetAdapter | where status -eq 'up').ifIndex;
-                      New-NetIPAddress -InterfaceIndex $ni -IPAddress '192.168.41.101' -PrefixLength 24 -DefaultGateway '192.168.41.1';
-                      Set-DnsClientServerAddress -InterfaceIndex $ni -ServerAddresses ('8.8.8.8','1.1.1.1');
-                      Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False;
-                    "</CommandLine>
+                    <CommandLine>cmd.exe /c powershell.exe -ExecutionPolicy Bypass -Command "$u='ansible_svc';$p=ConvertTo-SecureString 'cwg@2026' -AsPlainText -Force; if(!(Get-LocalUser -Name $u -ErrorAction SilentlyContinue)){New-LocalUser -Name $u -Password $p; Add-LocalGroupMember -Group 'Administrators' -Member $u;} Set-LocalUser -Name $u -PasswordNeverExpires $true; winrm quickconfig -q; Set-Service WinRM -StartupType Automatic; Enable-PSRemoting -Force; winrm set winrm/config/service '@{AllowUnencrypted=\"true\"}'; winrm set winrm/config/service/auth '@{Basic=\"true\"}'; $ni=(Get-NetAdapter | where status -eq 'up').ifIndex; New-NetIPAddress -InterfaceIndex $ni -IPAddress '192.168.41.101' -PrefixLength 24 -DefaultGateway '192.168.41.1'; Set-DnsClientServerAddress -InterfaceIndex $ni -ServerAddresses ('8.8.8.8','1.1.1.1'); Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False;"</CommandLine>
                   </SynchronousCommand>
                 </FirstLogonCommands>
               </component>
@@ -94,26 +78,30 @@
         boot_config:
           boot_type: "UEFI"
         
+        # Pre-emptive fix: Explicitly marking the network as connected
         networks:
-          - subnet:
+          - is_connected: true
+            subnet:
               uuid: "{{ subnet_uuid }}"
         
         disks:
+          # Changed bus to SCSI (AHV translates this to VirtIO storage controllers automatically)
           - type: "DISK"
-            bus: "VIRTIO"
+            bus: "SCSI"
             size_gb: "{{ disk_size_gb }}"
             storage_container:
               name: "{{ container_name }}"
+              
+          # Changed bus to IDE for maximum CD-ROM boot compatibility during install
           - type: "CDROM"
-            bus: "SATA"
+            bus: "IDE"
             clone_image:
               uuid: "{{ win_2022_iso }}"
           - type: "CDROM"
-            bus: "SATA"
+            bus: "IDE"
             clone_image:
               uuid: "{{ virtio_iso }}"
 
-        # This is exactly what the module is asking for
         guest_customization:
           type: "sysprep"
           script_path: "{{ sysprep_file_path }}"
@@ -129,7 +117,6 @@
         state: present
         name: "{{ vm_name }}"
         power_state: "on"
-      when: deploy_status.changed
 
     - name: Task 4 - Clean up temporary sysprep file
       file:
