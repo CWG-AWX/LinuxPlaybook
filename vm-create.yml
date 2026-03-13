@@ -1,5 +1,5 @@
 ---
-- name: Build Robust Windows 2022 VM
+- name: Build Robust Windows 2022 VM (Legacy BIOS + SATA)
   hosts: localhost
   gather_facts: false
   vars:
@@ -15,7 +15,7 @@
     
     # --- IMAGES ---
     win_2022_iso: "b3772959-af75-4d6c-9125-f5c941c0dd78"
-    virtio_iso: "4e5b6677-e2e2-4786-85f2-fe5e78d999bf"
+    virtio_iso: "4e5b6677-e2e2-4786-85f2-fe5e78d999bf" # Nutanix VirtIO 1.1.7
     
     # --- VM SPECS ---
     vm_name: "WIN-2022-SRE-PROD"
@@ -58,7 +58,7 @@
             </settings>
           </unattend>
 
-    - name: Task 2 - Deploy VM with validated parameters
+    - name: Task 2 - Deploy VM with Legacy BIOS and SATA CD-ROMs
       nutanix.ncp.ntnx_vms:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
@@ -68,12 +68,12 @@
         name: "{{ vm_name }}"
         cluster:
           uuid: "{{ cluster_uuid }}"
-        # FIXED KEYS PER ERROR MESSAGE
         vcpus: "{{ vcpus_count }}"
         cores_per_vcpu: 1
         memory_gb: "{{ memory_gb_size }}"
+        # CHANGED: Using Legacy BIOS
         boot_config:
-          boot_type: "UEFI"
+          boot_type: "LEGACY"
         
         networks:
           - is_connected: true
@@ -86,12 +86,13 @@
             size_gb: "{{ disk_size_gb }}"
             storage_container:
               name: "{{ container_name }}"
+          # CHANGED: Both ISOs now use SATA bus
           - type: "CDROM"
-            bus: "IDE"
+            bus: "SATA"
             clone_image:
               uuid: "{{ win_2022_iso }}"
           - type: "CDROM"
-            bus: "IDE"
+            bus: "SATA"
             clone_image:
               uuid: "{{ virtio_iso }}"
 
@@ -100,18 +101,20 @@
           script_path: "{{ sysprep_file_path }}"
       register: deploy_status
 
-    - name: Task 3 - Power On
-      nutanix.ncp.ntnx_vms:
+    - name: Task 3 - Power On the VM
+      nutanix.ncp.ntnx_vms_power_state:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
         nutanix_password: "{{ nutanix_pass }}"
         validate_certs: false
-        state: present
-        name: "{{ vm_name }}"
-        power_state: "on"
-      when: deploy_status.changed
-
+        vm_name: "{{ vm_name }}"
+        state: "on"
+      
     - name: Task 4 - Cleanup
       file:
         path: "{{ sysprep_file_path }}"
         state: absent
+
+    - name: Task 5 - Final Report
+      debug:
+        msg: "VM {{ vm_name }} deployed with Legacy BIOS and SATA ISOs. Booting now..."
