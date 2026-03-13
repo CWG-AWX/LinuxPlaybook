@@ -45,72 +45,72 @@
               uuid: "{{ subnet_uuid }}"
         
         disks:
-          # OS BOOT DISK
           - type: "DISK"
             bus: "VIRTIO"
             size_gb: "{{ disk_size_gb }}"
             storage_container:
               name: "{{ container_name }}"
-          # WINDOWS ISO
           - type: "CDROM"
             bus: "SATA"
             clone_image:
               uuid: "{{ win_2022_iso }}"
-          # VIRTIO ISO (Required for Nutanix Drivers)
           - type: "CDROM"
             bus: "SATA"
             clone_image:
               uuid: "{{ virtio_iso }}"
 
+        # Refined Guest Customization Block
         guest_customization:
-          type: "sysprep"
-          script: |
-            <?xml version="1.0" encoding="utf-8"?>
-            <unattend xmlns="urn:schemas-microsoft-com:unattend">
-              <settings pass="specialize">
-                <component name="Microsoft-Windows-Shell-Setup" language="neutral" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
-                  <TimeZone>W. Central Africa Standard Time</TimeZone>
-                </component>
-              </settings>
-              <settings pass="oobeSystem">
-                <component name="Microsoft-Windows-Shell-Setup" language="neutral" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
-                  <UserAccounts>
-                    <AdministratorPassword>
-                      <Value>security@123</Value>
-                      <PlainText>true</PlainText>
-                    </AdministratorPassword>
-                  </UserAccounts>
-                  <AutoLogon>
-                    <Password><Value>security@123</Value></Password>
-                    <Enabled>true</Enabled>
-                    <Username>Administrator</Username>
-                  </AutoLogon>
-                  <FirstLogonCommands>
-                    <SynchronousCommand action="add">
-                      <Order>1</Order>
-                      <Description>Run Prep Script</Description>
-                      <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "
-                        $u='ansible_svc';$p=ConvertTo-SecureString 'cwg@2026' -AsPlainText -Force;
-                        if(!(Get-LocalUser -Name $u -ErrorAction SilentlyContinue)){
-                          New-LocalUser -Name $u -Password $p;
-                          Add-LocalGroupMember -Group 'Administrators' -Member $u;
-                        }
-                        Set-LocalUser -Name $u -PasswordNeverExpires $true;
-                        winrm quickconfig -q;
-                        Set-Service WinRM -StartupType Automatic;
-                        Enable-PSRemoting -Force;
-                        winrm set winrm/config/service '@{AllowUnencrypted=\"true\"}';
-                        winrm set winrm/config/service/auth '@{Basic=\"true\"}';
-                        $ni=(Get-NetAdapter | where status -eq 'up').ifIndex;
-                        New-NetIPAddress -InterfaceIndex $ni -IPAddress '192.168.41.101' -PrefixLength 24 -DefaultGateway '192.168.41.1';
-                        Set-DnsClientServerAddress -InterfaceIndex $ni -ServerAddresses ('8.8.8.8','1.1.1.1');
-                        Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False;
-                      "</CommandLine>
-                    </SynchronousCommand>
-                  </FirstLogonCommands>
-                </component>
-              </settings>
-            </unattend>
+          cloud_init: # Some NCP versions use cloud_init as the parent key even for Sysprep
+            sysprep:
+              install_type: "fresh"
+              unattend_xml: |
+                <?xml version="1.0" encoding="utf-8"?>
+                <unattend xmlns="urn:schemas-microsoft-com:unattend">
+                  <settings pass="specialize">
+                    <component name="Microsoft-Windows-Shell-Setup" language="neutral" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
+                      <TimeZone>W. Central Africa Standard Time</TimeZone>
+                    </component>
+                  </settings>
+                  <settings pass="oobeSystem">
+                    <component name="Microsoft-Windows-Shell-Setup" language="neutral" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
+                      <UserAccounts>
+                        <AdministratorPassword>
+                          <Value>security@123</Value>
+                          <PlainText>true</PlainText>
+                        </AdministratorPassword>
+                      </UserAccounts>
+                      <AutoLogon>
+                        <Password><Value>security@123</Value></Password>
+                        <Enabled>true</Enabled>
+                        <Username>Administrator</Username>
+                      </AutoLogon>
+                      <FirstLogonCommands>
+                        <SynchronousCommand action="add">
+                          <Order>1</Order>
+                          <Description>Run Prep Script</Description>
+                          <CommandLine>powershell.exe -ExecutionPolicy Bypass -Command "
+                            $u='ansible_svc';$p=ConvertTo-SecureString 'cwg@2026' -AsPlainText -Force;
+                            if(!(Get-LocalUser -Name $u -ErrorAction SilentlyContinue)){
+                              New-LocalUser -Name $u -Password $p;
+                              Add-LocalGroupMember -Group 'Administrators' -Member $u;
+                            }
+                            Set-LocalUser -Name $u -PasswordNeverExpires $true;
+                            winrm quickconfig -q;
+                            Set-Service WinRM -StartupType Automatic;
+                            Enable-PSRemoting -Force;
+                            winrm set winrm/config/service '@{AllowUnencrypted=\"true\"}';
+                            winrm set winrm/config/service/auth '@{Basic=\"true\"}';
+                            $ni=(Get-NetAdapter | where status -eq 'up').ifIndex;
+                            New-NetIPAddress -InterfaceIndex $ni -IPAddress '192.168.41.101' -PrefixLength 24 -DefaultGateway '192.168.41.1';
+                            Set-DnsClientServerAddress -InterfaceIndex $ni -ServerAddresses ('8.8.8.8','1.1.1.1');
+                            Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False;
+                          "</CommandLine>
+                        </SynchronousCommand>
+                      </FirstLogonCommands>
+                    </component>
+                  </settings>
+                </unattend>
       register: deploy_status
 
     - name: Power On the VM
@@ -123,7 +123,3 @@
         name: "{{ vm_name }}"
         power_state: "on"
       when: deploy_status.changed
-
-    - name: Report Deployment
-      debug:
-        msg: "Deployment of {{ vm_name }} has been initiated with IP 192.168.41.101."
