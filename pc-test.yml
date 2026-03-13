@@ -6,14 +6,13 @@
     pc_ip: "10.20.24.111"
     pc_user: "michael"
     pc_pass: "Obateru@123"
-    target_cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
 
   tasks:
     - name: Task 1 - Verify Connection
       nutanix.ncp.ntnx_clusters_info:
-        pc_hostname: "{{ pc_ip }}"
-        pc_username: "{{ pc_user }}"
-        pc_password: "{{ pc_pass }}"
+        nutanix_host: "{{ pc_ip }}"
+        nutanix_username: "{{ pc_user }}"
+        nutanix_password: "{{ pc_pass }}"
         validate_certs: false
       register: cluster_list
 
@@ -23,11 +22,11 @@
           - "Connection Successful!"
           - "Prism Central Version: {{ cluster_list.response.metadata.api_version | default('Unknown') }}"
 
-    - name: Task 3 - List Images (Confirming NCP works)
+    - name: Task 3 - List Images
       nutanix.ncp.ntnx_images_info:
-        pc_hostname: "{{ pc_ip }}"
-        pc_username: "{{ pc_user }}"
-        pc_password: "{{ pc_pass }}"
+        nutanix_host: "{{ pc_ip }}"
+        nutanix_username: "{{ pc_user }}"
+        nutanix_password: "{{ pc_pass }}"
         validate_certs: false
       register: image_list
 
