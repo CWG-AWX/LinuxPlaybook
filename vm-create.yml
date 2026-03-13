@@ -19,15 +19,14 @@
     
     # --- VM SPECS ---
     vm_name: "WIN-2022-SRE-PROD"
-    vcpus: 2
-    memory_gb: 8
+    vcpus_count: 2
+    memory_gb_size: 8
     disk_size_gb: 500
     
-    # --- TEMP FILE PATH FOR AWX ---
     sysprep_file_path: "/tmp/unattend.xml"
 
   tasks:
-    - name: Task 1 - Generate sysprep XML file locally on AWX Runner
+    - name: Task 1 - Generate sysprep XML file
       copy:
         dest: "{{ sysprep_file_path }}"
         content: |
@@ -41,10 +40,7 @@
             <settings pass="oobeSystem">
               <component name="Microsoft-Windows-Shell-Setup" language="neutral" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
                 <UserAccounts>
-                  <AdministratorPassword>
-                    <Value>security@123</Value>
-                    <PlainText>true</PlainText>
-                  </AdministratorPassword>
+                  <AdministratorPassword><Value>security@123</Value><PlainText>true</PlainText></AdministratorPassword>
                 </UserAccounts>
                 <AutoLogon>
                   <Password><Value>security@123</Value></Password>
@@ -62,7 +58,7 @@
             </settings>
           </unattend>
 
-    - name: Task 2 - Deploy VM and pass the XML file
+    - name: Task 2 - Deploy VM with validated parameters
       nutanix.ncp.ntnx_vms:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
@@ -72,27 +68,24 @@
         name: "{{ vm_name }}"
         cluster:
           uuid: "{{ cluster_uuid }}"
-        num_vcpus: "{{ vcpus }}"
-        num_cores_per_vcpu: 1
-        memory_gb: "{{ memory_gb }}"
+        # FIXED KEYS PER ERROR MESSAGE
+        vcpus: "{{ vcpus_count }}"
+        cores_per_vcpu: 1
+        memory_gb: "{{ memory_gb_size }}"
         boot_config:
           boot_type: "UEFI"
         
-        # Pre-emptive fix: Explicitly marking the network as connected
         networks:
           - is_connected: true
             subnet:
               uuid: "{{ subnet_uuid }}"
         
         disks:
-          # Changed bus to SCSI (AHV translates this to VirtIO storage controllers automatically)
           - type: "DISK"
             bus: "SCSI"
             size_gb: "{{ disk_size_gb }}"
             storage_container:
               name: "{{ container_name }}"
-              
-          # Changed bus to IDE for maximum CD-ROM boot compatibility during install
           - type: "CDROM"
             bus: "IDE"
             clone_image:
@@ -105,10 +98,9 @@
         guest_customization:
           type: "sysprep"
           script_path: "{{ sysprep_file_path }}"
-          
       register: deploy_status
 
-    - name: Task 3 - Power On the VM
+    - name: Task 3 - Power On
       nutanix.ncp.ntnx_vms:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
@@ -117,12 +109,9 @@
         state: present
         name: "{{ vm_name }}"
         power_state: "on"
+      when: deploy_status.changed
 
-    - name: Task 4 - Clean up temporary sysprep file
+    - name: Task 4 - Cleanup
       file:
         path: "{{ sysprep_file_path }}"
         state: absent
-
-    - name: Task 5 - Report Deployment
-      debug:
-        msg: "Deployment of {{ vm_name }} has been initiated. Static IP will configure to 192.168.41.101 upon boot."
