@@ -1,0 +1,44 @@
+---
+- name: Test Nutanix Prism Central Connection
+  hosts: localhost
+  gather_facts: false
+  vars:
+    # Connection Details
+    pc_ip: "10.20.24.111"
+    pc_user: "michael"
+    pc_pass: "Obateru@123"
+    
+    # Target Cluster from our previous search
+    target_cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
+
+  tasks:
+    - name: Task 1 - Verify Connection and List Clusters
+      nutanix.metropolis.ntnx_clusters_info:
+        pc_hostname: "{{ pc_ip }}"
+        pc_username: "{{ pc_user }}"
+        pc_password: "{{ pc_pass }}"
+        validate_certs: false
+      register: cluster_list
+
+    - name: Task 2 - Check for our specific Cluster UUID
+      set_fact:
+        cluster_found: "{{ cluster_list.response.entities | selectattr('metadata.uuid', 'equalto', target_cluster_uuid) | list }}"
+
+    - name: Task 3 - Report Results
+      debug:
+        msg: 
+          - "Connection Successful!"
+          - "Prism Central Version: {{ cluster_list.response.metadata.api_version | default('Unknown') }}"
+          - "Status of target cluster (cwgnuxcl01): {{ 'FOUND' if cluster_found | length > 0 else 'NOT FOUND' }}"
+
+    - name: Task 4 - List All Images in PC (Verify our Import)
+      nutanix.metropolis.ntnx_images_info:
+        pc_hostname: "{{ pc_ip }}"
+        pc_username: "{{ pc_user }}"
+        pc_password: "{{ pc_pass }}"
+        validate_certs: false
+      register: image_list
+
+    - name: Task 5 - Print total images found
+      debug:
+        msg: "Found {{ image_list.response.metadata.total_matches }} images in Prism Central."
