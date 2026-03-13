@@ -18,7 +18,7 @@
     virtio_iso: "4e5b6677-e2e2-4786-85f2-fe5e78d999bf"
     
     # --- VM SPECS ---
-    vm_name: "WIN-2022-SRE-PROD"
+    vm_name: "WIN-2022-SRE-PROD2"
     vcpus_count: 2
     memory_gb_size: 8
     disk_size_gb: 500
