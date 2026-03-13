@@ -3,15 +3,26 @@
   hosts: localhost
   gather_facts: false
   vars:
+    # --- AUTHENTICATION ---
     nutanix_host: "10.20.24.111"
     nutanix_user: "michael"
     nutanix_pass: "Obateru@123"
+
+    # --- INFRASTRUCTURE ---
     cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
-    subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f"
+    subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f" 
     container_name: "cwg-default-container"
+    
+    # --- IMAGES ---
     win_2022_iso: "b3772959-af75-4d6c-9125-f5c941c0dd78"
     virtio_iso: "4e5b6677-e2e2-4786-85f2-fe5e78d999bf"
+    
+    # --- VM SPECS ---
     vm_name: "WIN-2022-SRE-PROD"
+    vcpus_count: 2
+    memory_gb_size: 8
+    disk_size_gb: 500
+    
     sysprep_file_path: "/tmp/unattend.xml"
 
   tasks:
@@ -46,7 +57,7 @@
             </settings>
           </unattend>
 
-    - name: Task 2 - Define VM
+    - name: Task 2 - Create and Start VM
       nutanix.ncp.ntnx_vms:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
@@ -56,9 +67,9 @@
         name: "{{ vm_name }}"
         cluster:
           uuid: "{{ cluster_uuid }}"
-        vcpus: 2
+        vcpus: "{{ vcpus_count }}"
         cores_per_vcpu: 1
-        memory_gb: 8
+        memory_gb: "{{ memory_gb_size }}"
         boot_config:
           boot_type: "LEGACY"
         networks:
@@ -68,7 +79,7 @@
         disks:
           - type: "DISK"
             bus: "SCSI"
-            size_gb: 500
+            size_gb: "{{ disk_size_gb }}"
             storage_container:
               name: "{{ container_name }}"
           - type: "CDROM"
@@ -82,22 +93,12 @@
         guest_customization:
           type: "sysprep"
           script_path: "{{ sysprep_file_path }}"
-      register: deploy_status
 
-    - name: Task 3 - Power On (Using same module with power_state)
-      nutanix.ncp.ntnx_vms:
-        nutanix_host: "{{ nutanix_host }}"
-        nutanix_username: "{{ nutanix_user }}"
-        nutanix_password: "{{ nutanix_pass }}"
-        validate_certs: false
-        state: present
-        name: "{{ vm_name }}"
-        # In many NCP 2.x versions, this is the valid way to trigger power
-        # We call it separately to avoid hardware validation errors
-        power_state: "on"
-      when: deploy_status is defined
-
-    - name: Task 4 - Cleanup
+    - name: Task 3 - Cleanup local file
       file:
         path: "{{ sysprep_file_path }}"
         state: absent
+
+    - name: Task 4 - Deployment Summary
+      debug:
+        msg: "VM {{ vm_name }} has been successfully created and started. Proceed with OS installation via the Nutanix console."
