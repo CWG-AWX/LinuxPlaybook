@@ -1,28 +1,17 @@
 ---
-- name: Build Robust Windows 2022 VM (Legacy BIOS + SATA)
+- name: Build Robust Windows 2022 VM
   hosts: localhost
   gather_facts: false
   vars:
-    # --- AUTHENTICATION ---
     nutanix_host: "10.20.24.111"
     nutanix_user: "michael"
     nutanix_pass: "Obateru@123"
-
-    # --- INFRASTRUCTURE ---
     cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
-    subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f" # NKP-VLAN
+    subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f"
     container_name: "cwg-default-container"
-    
-    # --- IMAGES ---
     win_2022_iso: "b3772959-af75-4d6c-9125-f5c941c0dd78"
-    virtio_iso: "4e5b6677-e2e2-4786-85f2-fe5e78d999bf" # Nutanix VirtIO 1.1.7
-    
-    # --- VM SPECS ---
+    virtio_iso: "4e5b6677-e2e2-4786-85f2-fe5e78d999bf"
     vm_name: "WIN-2022-SRE-PROD"
-    vcpus_count: 2
-    memory_gb_size: 8
-    disk_size_gb: 500
-    
     sysprep_file_path: "/tmp/unattend.xml"
 
   tasks:
@@ -50,7 +39,6 @@
                 <FirstLogonCommands>
                   <SynchronousCommand action="add">
                     <Order>1</Order>
-                    <Description>Run Prep Script</Description>
                     <CommandLine>cmd.exe /c powershell.exe -ExecutionPolicy Bypass -Command "$u='ansible_svc';$p=ConvertTo-SecureString 'cwg@2026' -AsPlainText -Force; if(!(Get-LocalUser -Name $u -ErrorAction SilentlyContinue)){New-LocalUser -Name $u -Password $p; Add-LocalGroupMember -Group 'Administrators' -Member $u;} Set-LocalUser -Name $u -PasswordNeverExpires $true; winrm quickconfig -q; Set-Service WinRM -StartupType Automatic; Enable-PSRemoting -Force; winrm set winrm/config/service '@{AllowUnencrypted=\"true\"}'; winrm set winrm/config/service/auth '@{Basic=\"true\"}'; $ni=(Get-NetAdapter | where status -eq 'up').ifIndex; New-NetIPAddress -InterfaceIndex $ni -IPAddress '192.168.41.101' -PrefixLength 24 -DefaultGateway '192.168.41.1'; Set-DnsClientServerAddress -InterfaceIndex $ni -ServerAddresses ('8.8.8.8','1.1.1.1'); Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False;"</CommandLine>
                   </SynchronousCommand>
                 </FirstLogonCommands>
@@ -58,7 +46,7 @@
             </settings>
           </unattend>
 
-    - name: Task 2 - Deploy VM with Legacy BIOS and SATA CD-ROMs
+    - name: Task 2 - Define VM
       nutanix.ncp.ntnx_vms:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
@@ -68,25 +56,21 @@
         name: "{{ vm_name }}"
         cluster:
           uuid: "{{ cluster_uuid }}"
-        vcpus: "{{ vcpus_count }}"
+        vcpus: 2
         cores_per_vcpu: 1
-        memory_gb: "{{ memory_gb_size }}"
-        # CHANGED: Using Legacy BIOS
+        memory_gb: 8
         boot_config:
           boot_type: "LEGACY"
-        
         networks:
           - is_connected: true
             subnet:
               uuid: "{{ subnet_uuid }}"
-        
         disks:
           - type: "DISK"
             bus: "SCSI"
-            size_gb: "{{ disk_size_gb }}"
+            size_gb: 500
             storage_container:
               name: "{{ container_name }}"
-          # CHANGED: Both ISOs now use SATA bus
           - type: "CDROM"
             bus: "SATA"
             clone_image:
@@ -95,26 +79,25 @@
             bus: "SATA"
             clone_image:
               uuid: "{{ virtio_iso }}"
-
         guest_customization:
           type: "sysprep"
           script_path: "{{ sysprep_file_path }}"
       register: deploy_status
 
-    - name: Task 3 - Power On the VM
-      nutanix.ncp.ntnx_vms_power_state:
+    - name: Task 3 - Power On (Using same module with power_state)
+      nutanix.ncp.ntnx_vms:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
         nutanix_password: "{{ nutanix_pass }}"
         validate_certs: false
-        vm_name: "{{ vm_name }}"
-        state: "on"
-      
+        state: present
+        name: "{{ vm_name }}"
+        # In many NCP 2.x versions, this is the valid way to trigger power
+        # We call it separately to avoid hardware validation errors
+        power_state: "on"
+      when: deploy_status is defined
+
     - name: Task 4 - Cleanup
       file:
         path: "{{ sysprep_file_path }}"
         state: absent
-
-    - name: Task 5 - Final Report
-      debug:
-        msg: "VM {{ vm_name }} deployed with Legacy BIOS and SATA ISOs. Booting now..."
