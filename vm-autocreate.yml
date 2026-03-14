@@ -1,31 +1,32 @@
 ---
-- name: Deploy Legacy BIOS Windows 2022 VM
+- name: Deploy Zero-Touch Windows 2022 VM
   hosts: localhost
   gather_facts: false
   vars:
     # --- AUTHENTICATION ---
-    nutanix_host: "10.20.24.111"
-    nutanix_user: "michael"
-    nutanix_pass: "Obateru@123"
+    nutanix_host: "10.20.24.111" 
+    nutanix_user: "michael" 
+    nutanix_pass: "Obateru@123" 
 
     # --- INFRASTRUCTURE ---
-    cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
-    subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f"
+    cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55" 
+    subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f" 
+    image_uuid: "3e1e24c8-546e-4f6c-8273-0e768052ad4a" 
     
-    # --- IMAGE & IDENTITY ---
-    image_uuid: "3e1e24c8-546e-4f6c-8273-0e768052ad4a"
+    # --- DYNAMIC VM VARIABLES ---
     vm_name: "ansible-win"
     target_ip: "192.168.41.102"
+    target_gateway: "192.168.41.1"
     
-    sysprep_path: "/tmp/unattend_legacy.xml"
+    sysprep_path: "/tmp/unattend_fire_forget.xml"
 
   tasks:
-    - name: Task 1 - Generate robust unattend.xml
+    - name: Task 1 - Generate Zero-Touch unattend.xml
       copy:
         dest: "{{ sysprep_path }}"
         content: |
           <?xml version="1.0" encoding="utf-8"?>
-          <unattend xmlns="urn:schemas-microsoft-com:unattend">
+          <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
             <settings pass="specialize">
               <component name="Microsoft-Windows-Shell-Setup" language="neutral" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
                 <ComputerName>{{ vm_name }}</ComputerName>
@@ -44,19 +45,40 @@
                     <Value>security@123</Value>
                     <PlainText>true</PlainText>
                   </AdministratorPassword>
+                  <LocalAccounts>
+                    <LocalAccount wcm:action="add">
+                      <Password>
+                        <Value>cwg@2026</Value>
+                        <PlainText>true</PlainText>
+                      </Password>
+                      <Description>OS Admin</Description>
+                      <DisplayName>osadmin</DisplayName>
+                      <Group>Administrators</Group>
+                      <Name>osadmin</Name>
+                    </LocalAccount>
+                  </LocalAccounts>
                 </UserAccounts>
+                <AutoLogon>
+                  <Password>
+                    <Value>security@123</Value>
+                    <PlainText>true</PlainText>
+                  </Password>
+                  <Enabled>true</Enabled>
+                  <LogonCount>1</LogonCount>
+                  <Username>Administrator</Username>
+                </AutoLogon>
                 <FirstLogonCommands>
-                  <SynchronousCommand action="add">
+                  <SynchronousCommand wcm:action="add">
                     <Order>1</Order>
-                    <Description>Setup OSAdmin, RDP, and License</Description>
-                    <CommandLine><![CDATA[powershell.exe -ExecutionPolicy Bypass -Command "$u='osadmin';$p=ConvertTo-SecureString 'cwg@2026' -AsPlainText -Force;$n=New-LocalUser -Name $u -Password $p -PasswordNeverExpires $true;Add-LocalGroupMember -Group 'Administrators' -Member $u;Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $u;Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0;Enable-NetFirewallRule -DisplayGroup '@FirewallAPI.dll,-28752';$ni=(Get-NetAdapter | where status -eq 'up' | select -First 1).ifIndex;New-NetIPAddress -InterfaceIndex $ni -IPAddress '192.168.41.102' -PrefixLength 24 -DefaultGateway '192.168.41.1';Set-DnsClientServerAddress -InterfaceIndex $ni -ServerAddresses ('8.8.8.8','1.1.1.1');cscript //nologo c:\windows\system32\slmgr.vbs /ipk VDYBN-27WPP-V4HQT-9VMD4-VMK7H;cscript //nologo c:\windows\system32\slmgr.vbs /ato;"]]></CommandLine>
+                    <Description>Configure OSAdmin, RDP, Network, and Activate</Description>
+                    <CommandLine><![CDATA[powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -Command "Set-LocalUser -Name 'osadmin' -PasswordNeverExpires $true; Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'osadmin'; Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0; Enable-NetFirewallRule -DisplayGroup '@FirewallAPI.dll,-28752'; $ni=(Get-NetAdapter | Where-Object Status -eq 'Up' | Select-Object -First 1).ifIndex; New-NetIPAddress -InterfaceIndex $ni -IPAddress '{{ target_ip }}' -PrefixLength 24 -DefaultGateway '{{ target_gateway }}'; Set-DnsClientServerAddress -InterfaceIndex $ni -ServerAddresses ('8.8.8.8','1.1.1.1'); cscript.exe //b c:\windows\system32\slmgr.vbs /ipk VDYBN-27WPP-V4HQT-9VMD4-VMK7H; cscript.exe //b c:\windows\system32\slmgr.vbs /ato;"]]></CommandLine>
                   </SynchronousCommand>
                 </FirstLogonCommands>
               </component>
             </settings>
           </unattend>
 
-    - name: Task 2 - Create VM with Legacy BIOS
+    - name: Task 2 - Deploy VM with Legacy Boot
       nutanix.ncp.ntnx_vms:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
@@ -69,7 +91,7 @@
         vcpus: 2
         memory_gb: 8
         boot_config:
-          boot_type: "LEGACY"  # <--- CHANGED TO LEGACY
+          boot_type: "LEGACY"
         networks:
           - is_connected: true
             subnet:
@@ -83,7 +105,16 @@
           type: "sysprep"
           script_path: "{{ sysprep_path }}"
 
-    - name: Task 3 - Cleanup
+    - name: Task 3 - Wait for VM to become ready for RDP
+      wait_for:
+        host: "{{ target_ip }}"
+        port: 3389
+        state: started
+        delay: 60
+        timeout: 600 # Waits up to 10 minutes before failing
+      delegate_to: localhost
+
+    - name: Task 4 - Cleanup Sysprep File
       file:
         path: "{{ sysprep_path }}"
         state: absent
