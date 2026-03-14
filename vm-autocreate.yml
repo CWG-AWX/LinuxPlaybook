@@ -1,5 +1,5 @@
 ---
-- name: Deploy Specialized Windows 2022 VM
+- name: Deploy Legacy BIOS Windows 2022 VM
   hosts: localhost
   gather_facts: false
   vars:
@@ -17,10 +17,10 @@
     vm_name: "ansible-win"
     target_ip: "192.168.41.102"
     
-    sysprep_path: "/tmp/unattend_special.xml"
+    sysprep_path: "/tmp/unattend_legacy.xml"
 
   tasks:
-    - name: Task 1 - Generate specialized unattend.xml
+    - name: Task 1 - Generate robust unattend.xml
       copy:
         dest: "{{ sysprep_path }}"
         content: |
@@ -48,31 +48,15 @@
                 <FirstLogonCommands>
                   <SynchronousCommand action="add">
                     <Order>1</Order>
-                    <Description>Configure OSAdmin, RDP, and Network</Description>
-                    <CommandLine>cmd.exe /c powershell.exe -ExecutionPolicy Bypass -Command "
-                      $u='osadmin';
-                      $p=ConvertTo-SecureString 'cwg@2026' -AsPlainText -Force;
-                      if(!(Get-LocalUser -Name $u -ErrorAction SilentlyContinue)){
-                        New-LocalUser -Name $u -Password $p;
-                        Add-LocalGroupMember -Group 'Administrators' -Member $u;
-                        Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $u;
-                      }
-                      Set-LocalUser -Name $u -PasswordNeverExpires $true;
-                      Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0;
-                      Enable-NetFirewallRule -DisplayGroup '@FirewallAPI.dll,-28752';
-                      $ni=(Get-NetAdapter | where status -eq 'up').ifIndex;
-                      New-NetIPAddress -InterfaceIndex $ni -IPAddress '{{ target_ip }}' -PrefixLength 24 -DefaultGateway '192.168.41.1';
-                      Set-DnsClientServerAddress -InterfaceIndex $ni -ServerAddresses ('8.8.8.8','1.1.1.1');
-                      cscript //nologo c:\windows\system32\slmgr.vbs /ipk VDYBN-27WPP-V4HQT-9VMD4-VMK7H;
-                      cscript //nologo c:\windows\system32\slmgr.vbs /ato;
-                    "</CommandLine>
+                    <Description>Setup OSAdmin, RDP, and License</Description>
+                    <CommandLine><![CDATA[powershell.exe -ExecutionPolicy Bypass -Command "$u='osadmin';$p=ConvertTo-SecureString 'cwg@2026' -AsPlainText -Force;$n=New-LocalUser -Name $u -Password $p -PasswordNeverExpires $true;Add-LocalGroupMember -Group 'Administrators' -Member $u;Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $u;Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0;Enable-NetFirewallRule -DisplayGroup '@FirewallAPI.dll,-28752';$ni=(Get-NetAdapter | where status -eq 'up' | select -First 1).ifIndex;New-NetIPAddress -InterfaceIndex $ni -IPAddress '192.168.41.102' -PrefixLength 24 -DefaultGateway '192.168.41.1';Set-DnsClientServerAddress -InterfaceIndex $ni -ServerAddresses ('8.8.8.8','1.1.1.1');cscript //nologo c:\windows\system32\slmgr.vbs /ipk VDYBN-27WPP-V4HQT-9VMD4-VMK7H;cscript //nologo c:\windows\system32\slmgr.vbs /ato;"]]></CommandLine>
                   </SynchronousCommand>
                 </FirstLogonCommands>
               </component>
             </settings>
           </unattend>
 
-    - name: Task 2 - Create VM from Golden Image
+    - name: Task 2 - Create VM with Legacy BIOS
       nutanix.ncp.ntnx_vms:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
@@ -85,7 +69,7 @@
         vcpus: 2
         memory_gb: 8
         boot_config:
-          boot_type: "LEGACY"
+          boot_type: "LEGACY"  # <--- CHANGED TO LEGACY
         networks:
           - is_connected: true
             subnet:
