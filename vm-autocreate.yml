@@ -1,0 +1,105 @@
+---
+- name: Deploy Specialized Windows 2022 VM
+  hosts: localhost
+  gather_facts: false
+  vars:
+    # --- AUTHENTICATION ---
+    nutanix_host: "10.20.24.111"
+    nutanix_user: "michael"
+    nutanix_pass: "Obateru@123"
+
+    # --- INFRASTRUCTURE ---
+    cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
+    subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f"
+    
+    # --- IMAGE & IDENTITY ---
+    image_uuid: "3e1e24c8-546e-4f6c-8273-0e768052ad4a"
+    vm_name: "ansible-win"
+    target_ip: "192.168.41.102"
+    
+    sysprep_path: "/tmp/unattend_special.xml"
+
+  tasks:
+    - name: Task 1 - Generate specialized unattend.xml
+      copy:
+        dest: "{{ sysprep_path }}"
+        content: |
+          <?xml version="1.0" encoding="utf-8"?>
+          <unattend xmlns="urn:schemas-microsoft-com:unattend">
+            <settings pass="specialize">
+              <component name="Microsoft-Windows-Shell-Setup" language="neutral" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
+                <ComputerName>{{ vm_name }}</ComputerName>
+                <ProductKey>VDYBN-27WPP-V4HQT-9VMD4-VMK7H</ProductKey>
+              </component>
+            </settings>
+            <settings pass="oobeSystem">
+              <component name="Microsoft-Windows-Shell-Setup" language="neutral" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
+                <OOBE>
+                  <HideEULAPage>true</HideEULAPage>
+                  <NetworkLocation>Work</NetworkLocation>
+                  <ProtectYourPC>1</ProtectYourPC>
+                </OOBE>
+                <UserAccounts>
+                  <AdministratorPassword>
+                    <Value>security@123</Value>
+                    <PlainText>true</PlainText>
+                  </AdministratorPassword>
+                </UserAccounts>
+                <FirstLogonCommands>
+                  <SynchronousCommand action="add">
+                    <Order>1</Order>
+                    <Description>Configure OSAdmin, RDP, and Network</Description>
+                    <CommandLine>cmd.exe /c powershell.exe -ExecutionPolicy Bypass -Command "
+                      $u='osadmin';
+                      $p=ConvertTo-SecureString 'cwg@2026' -AsPlainText -Force;
+                      if(!(Get-LocalUser -Name $u -ErrorAction SilentlyContinue)){
+                        New-LocalUser -Name $u -Password $p;
+                        Add-LocalGroupMember -Group 'Administrators' -Member $u;
+                        Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $u;
+                      }
+                      Set-LocalUser -Name $u -PasswordNeverExpires $true;
+                      Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0;
+                      Enable-NetFirewallRule -DisplayGroup '@FirewallAPI.dll,-28752';
+                      $ni=(Get-NetAdapter | where status -eq 'up').ifIndex;
+                      New-NetIPAddress -InterfaceIndex $ni -IPAddress '{{ target_ip }}' -PrefixLength 24 -DefaultGateway '192.168.41.1';
+                      Set-DnsClientServerAddress -InterfaceIndex $ni -ServerAddresses ('8.8.8.8','1.1.1.1');
+                      cscript //nologo c:\windows\system32\slmgr.vbs /ipk VDYBN-27WPP-V4HQT-9VMD4-VMK7H;
+                      cscript //nologo c:\windows\system32\slmgr.vbs /ato;
+                    "</CommandLine>
+                  </SynchronousCommand>
+                </FirstLogonCommands>
+              </component>
+            </settings>
+          </unattend>
+
+    - name: Task 2 - Create VM from Golden Image
+      nutanix.ncp.ntnx_vms:
+        nutanix_host: "{{ nutanix_host }}"
+        nutanix_username: "{{ nutanix_user }}"
+        nutanix_password: "{{ nutanix_pass }}"
+        validate_certs: false
+        state: present
+        name: "{{ vm_name }}"
+        cluster:
+          uuid: "{{ cluster_uuid }}"
+        vcpus: 2
+        memory_gb: 8
+        boot_config:
+          boot_type: "LEGACY"
+        networks:
+          - is_connected: true
+            subnet:
+              uuid: "{{ subnet_uuid }}"
+        disks:
+          - type: "DISK"
+            bus: "SCSI"
+            clone_image:
+              uuid: "{{ image_uuid }}"
+        guest_customization:
+          type: "sysprep"
+          script_path: "{{ sysprep_path }}"
+
+    - name: Task 3 - Cleanup
+      file:
+        path: "{{ sysprep_path }}"
+        state: absent
