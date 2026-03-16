@@ -1,20 +1,19 @@
 ---
-- name: Identify Windows services on Port 80
-  hosts: windows
-  tasks:
-    - name: Query port 80 and map to service name
-      win_shell: |
-        $connections = Get-NetTCPConnection -LocalPort 80 -State Listen -ErrorAction SilentlyContinue
-        if ($connections) {
-            foreach ($c in $connections) {
-                $process = Get-Process -Id $c.OwningProcess
-                write-output "Process: $($process.ProcessName) (PID: $($c.OwningProcess))"
-            }
-        } else {
-            write-output "No service listening on port 80"
-        }
-      register: port_80_result
+- name: Get Windows services running on port 80
+  hosts: all
+  gather_facts: no
 
-    - name: Show results
+  tasks:
+
+    - name: Find PID using port 80
+      win_shell: |
+        $port = Get-NetTCPConnection -LocalPort 80 -State Listen -ErrorAction SilentlyContinue
+        if ($port) {
+            $pid = $port.OwningProcess
+            Get-WmiObject Win32_Service | Where-Object {$_.ProcessId -eq $pid} | Select Name,DisplayName,State
+        }
+      register: port80_service
+
+    - name: Display services using port 80
       debug:
-        msg: "{{ port_80_result.stdout_lines }}"
+        var: port80_service.stdout_lines
