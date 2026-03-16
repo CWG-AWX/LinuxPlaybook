@@ -1,40 +1,20 @@
-- name: Check services listening on port 443
+---
+- name: Identify Windows services on Port 80
   hosts: all
-  gather_facts: no
-
   tasks:
-
-    - name: Get service on port 443
+    - name: Query port 80 and map to service name
       win_shell: |
-        $conn = Get-NetTCPConnection -LocalPort 443 -State Listen -ErrorAction SilentlyContinue
-
-        if ($conn) {
-            foreach ($c in $conn) {
-                $pid = $c.OwningProcess
-
-                $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$pid"
-                $svc  = Get-CimInstance Win32_Service | Where-Object {$_.ProcessId -eq $pid}
-
-                "Port: $($c.LocalPort)"
-                "PID: $pid"
-                "Process: $($proc.Name)"
-
-                if ($svc) {
-                    "Service: $($svc.Name)"
-                    "DisplayName: $($svc.DisplayName)"
-                }
-                else {
-                    "Service: Not a Windows service (likely an application process)"
-                }
-
-                ""
+        $connections = Get-NetTCPConnection -LocalPort 80 -State Listen -ErrorAction SilentlyContinue
+        if ($connections) {
+            foreach ($c in $connections) {
+                $process = Get-Process -Id $c.OwningProcess
+                write-output "Process: $($process.ProcessName) (PID: $($c.OwningProcess))"
             }
+        } else {
+            write-output "No service listening on port 80"
         }
-        else {
-            "No service running on port 443"
-        }
-      register: result
-      failed_when: false
+      register: port_80_result
 
-    - debug:
-        var: result.stdout_lines
+    - name: Show results
+      debug:
+        msg: "{{ port_80_result.stdout_lines }}"
