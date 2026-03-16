@@ -1,19 +1,19 @@
 ---
-- name: Get Windows services running on port 80
+- name: Get Windows services running on port 443
   hosts: all
   gather_facts: no
 
   tasks:
 
-    - name: Find PID using port 80
+    - name: Find PID using port 443
       win_shell: |
-        $port = Get-NetTCPConnection -LocalPort 80 -State Listen -ErrorAction SilentlyContinue
+        $port = Get-NetTCPConnection -LocalPort 443 -State Listen -ErrorAction SilentlyContinue
         if ($port) {
             $pid = $port.OwningProcess
             Get-WmiObject Win32_Service | Where-Object {$_.ProcessId -eq $pid} | Select Name,DisplayName,State
         }
-      register: port80_service
+      register: port443_service
 
-    - name: Display services using port 80
+    - name: Display services using port 443
       debug:
         var: port80_service.stdout_lines
