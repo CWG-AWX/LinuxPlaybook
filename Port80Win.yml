@@ -1,12 +1,12 @@
-- name: Check services listening on port 443
+- name: Check services listening on port 80
   hosts: all
   gather_facts: no
 
   tasks:
 
-    - name: Get service on port 443
+    - name: Get service on port 80
       win_shell: |
-        $conn = Get-NetTCPConnection -LocalPort 443 -State Listen -ErrorAction SilentlyContinue
+        $conn = Get-NetTCPConnection -LocalPort 80 -State Listen -ErrorAction SilentlyContinue
         if ($conn) {
             $pid = $conn.OwningProcess
             $proc = Get-Process -Id $pid
@@ -16,7 +16,7 @@
             "Service: $($svc.Name)"
             "DisplayName: $($svc.DisplayName)"
         } else {
-            "No service running on port 443"
+            "No service running on port 80"
         }
       register: result
       failed_when: false
