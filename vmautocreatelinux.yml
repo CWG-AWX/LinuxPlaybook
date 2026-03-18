@@ -1,0 +1,121 @@
+---
+- name: Deploy Zero-Touch RHEL 9 VM
+  hosts: all
+  gather_facts: false
+
+  vars:
+    # --- AUTHENTICATION ---
+    nutanix_host: "10.20.24.111"
+    nutanix_user: "michael"
+    nutanix_pass: "Obateru@123"
+
+    # --- INFRASTRUCTURE ---
+    cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
+    subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f"
+    image_uuid: "888d9649-c1a9-462e-b358-c9f03e765e91"
+
+    # Injected from AWX Survey
+    sysprep_path: "/tmp/cloud-init.yaml"
+
+  tasks:
+
+    - name: Task 1 - Generate cloud-init config for RHEL 9
+      copy:
+        dest: "{{ sysprep_path }}"
+        content: |
+          #cloud-config
+
+          users:
+            - name: Administrator
+              groups: wheel
+              shell: /bin/bash
+              sudo: ALL=(ALL) NOPASSWD:ALL
+              lock_passwd: false
+
+          chpasswd:
+            list: |
+              Administrator:cwg@2026
+            expire: false
+
+          write_files:
+            - path: /usr/local/bin/custom-init.sh
+              permissions: '0755'
+              content: |
+                #!/bin/bash
+
+                # Set timezone
+                timedatectl set-timezone America/New_York
+
+                # Enable and start firewalld
+                systemctl enable firewalld --now
+
+                # Enable and start sshd
+                systemctl enable sshd --now
+
+                # Ensure password never expires
+                chage -M 99999 Administrator
+
+            - path: /etc/systemd/system/custom-init.service
+              permissions: '0644'
+              content: |
+                [Unit]
+                Description=Custom Init Script
+                After=network.target
+
+                [Service]
+                Type=oneshot
+                ExecStart=/usr/local/bin/custom-init.sh
+                RemainAfterExit=true
+
+                [Install]
+                WantedBy=multi-user.target
+
+          runcmd:
+            - systemctl daemon-reexec
+            - systemctl daemon-reload
+            - systemctl enable custom-init.service
+            - systemctl start custom-init.service
+
+
+    - name: Task 2 - Deploy RHEL 9 VM
+      nutanix.ncp.ntnx_vms:
+        nutanix_host: "{{ nutanix_host }}"
+        nutanix_username: "{{ nutanix_user }}"
+        nutanix_password: "{{ nutanix_pass }}"
+        validate_certs: false
+        state: present
+        name: "{{ vm_name }}"
+        cluster:
+          uuid: "{{ cluster_uuid }}"
+        vcpus: 2
+        memory_gb: 8
+        boot_config:
+          boot_type: "LEGACY"
+        networks:
+          - is_connected: true
+            subnet:
+              uuid: "{{ subnet_uuid }}"
+        disks:
+          - type: "DISK"
+            bus: "SCSI"
+            clone_image:
+              uuid: "{{ image_uuid }}"
+        guest_customization:
+          type: "cloud_init"
+          script_path: "{{ sysprep_path }}"
+
+
+    - name: Task 3 - Wait for SSH to be available
+      wait_for:
+        host: "{{ target_ip }}"
+        port: 22
+        state: started
+        delay: 60
+        timeout: 600
+      delegate_to: localhost
+
+
+    - name: Task 4 - Cleanup cloud-init file
+      file:
+        path: "{{ sysprep_path }}"
+        state: absent
