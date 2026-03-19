@@ -12,7 +12,7 @@
     # --- INFRASTRUCTURE ---
     cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
     subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f"
-    image_uuid: "888d9649-c1a9-462e-b358-c9f03e765e91"
+    image_uuid: "726d4f5c-d810-473f-a61f-cc4acdad5e39"
 
     # Injected from AWX Survey
     sysprep_path: "/tmp/cloud-init.yaml"
