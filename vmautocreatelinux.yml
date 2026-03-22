@@ -1,25 +1,30 @@
 ---
-- name: Deploy RHEL 9 VM and Prepare for AWX Bootstrap
+- name: Deploy RHEL 9 VM (Static IP - Nutanix + AWX Ready)
   hosts: localhost
   gather_facts: false
 
   vars:
-    # --- AUTHENTICATION ---
+    # --- NUTANIX AUTH ---
     nutanix_host: "10.20.24.111"
     nutanix_user: "michael"
     nutanix_pass: "Obateru@123"
 
-    # --- INFRASTRUCTURE ---
+    # --- INFRA ---
     cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
     subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f"
     image_uuid: "5ea85426-1c3e-42a5-9b45-fb1fd91fdcbc"
 
-    # --- VARIABLES ---
+    # --- PROVIDED VIA AWX SURVEY ---
+    # vm_name
+    # target_ip
+    # target_gateway
+    netmask: "24"
+
     sysprep_path: "/tmp/cloud-init.yaml"
 
   tasks:
 
-    - name: Generate working cloud-init config
+    - name: Create cloud-init config (STATIC + TIMEZONE + CRON)
       copy:
         dest: "{{ sysprep_path }}"
         content: |
@@ -37,23 +42,39 @@
               Administrator:cwg@2026
             expire: false
 
+          ssh_pwauth: true
+          package_update: true
+
+          # ✅ STATIC NETWORK CONFIG
+          network:
+            version: 2
+            ethernets:
+              eth0:
+                dhcp4: no
+                addresses:
+                  - {{ target_ip }}/{{ netmask }}
+                gateway4: {{ target_gateway }}
+                nameservers:
+                  addresses:
+                    - 8.8.8.8
+                    - 1.1.1.1
+
+          # ✅ TIMEZONE
+          timezone: America/New_York
+
+          # ✅ SYSTEM SETUP
           runcmd:
-            - IFACE=$(nmcli -t -f DEVICE,STATE dev | grep ":connected" | cut -d: -f1 | head -n1)
-            - nmcli con mod "$IFACE" ipv4.addresses {{ target_ip }}/24
-            - nmcli con mod "$IFACE" ipv4.gateway {{ target_gateway }}
-            - nmcli con mod "$IFACE" ipv4.dns "8.8.8.8 1.1.1.1"
-            - nmcli con mod "$IFACE" ipv4.method manual
-            - nmcli con down "$IFACE"
-            - nmcli con up "$IFACE"
-            - timedatectl set-timezone America/New_York
             - systemctl enable sshd --now
             - systemctl enable firewalld --now
             - firewall-cmd --permanent --add-service=ssh
             - firewall-cmd --reload
-            - chage -M 99999 Administrator
 
+            # ✅ CRON JOB (every 2 minutes)
+            - echo "*/2 * * * * root logger 'AWX test in progress'" > /etc/cron.d/awx-test
+            - chmod 644 /etc/cron.d/awx-test
+            - systemctl restart crond
 
-    - name: Deploy RHEL 9 VM
+    - name: Deploy VM
       nutanix.ncp.ntnx_vms:
         nutanix_host: "{{ nutanix_host }}"
         nutanix_username: "{{ nutanix_user }}"
@@ -72,81 +93,76 @@
             subnet:
               uuid: "{{ subnet_uuid }}"
         disks:
-          - type: "DISK"
-            bus: "SCSI"
+          - type: DISK
+            bus: SCSI
             clone_image:
               uuid: "{{ image_uuid }}"
         guest_customization:
-          type: "cloud_init"
+          type: cloud_init
           script_path: "{{ sysprep_path }}"
-
 
     - name: Wait for SSH to be available
       wait_for:
         host: "{{ target_ip }}"
         port: 22
-        state: started
-        delay: 90
-        timeout: 900
+        delay: 60
+        timeout: 600
 
-
-    - name: Add new VM as localhost target
+    - name: Add VM to inventory
       add_host:
-        name: localhost
+        name: new_vm
         ansible_host: "{{ target_ip }}"
         ansible_user: Administrator
         ansible_password: "cwg@2026"
         ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
 
-
-    - name: Cleanup cloud-init file
+    - name: Remove temporary cloud-init file
       file:
         path: "{{ sysprep_path }}"
         state: absent
 
 
+# =========================================
+# CONFIGURE VM (AWX BOOTSTRAP)
+# =========================================
 
-# ===============================
-# YOUR EXACT PLAY (UNCHANGED)
-# ===============================
-
-- name: Bootstrap Linux Nodes for AWX
-  hosts: localhost
+- name: Bootstrap Linux Node for AWX
+  hosts: new_vm
   become: yes
+
   vars:
     ansible_user_name: "ansible"
     awx_pub_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBEuxy3oDAAUDqVY4pDOISchf5DDrU491kluibL64HqK awx-ansible"
 
   tasks:
-    - name: Create the ansible service account
+
+    - name: Create ansible user
       user:
         name: "{{ ansible_user_name }}"
         shell: /bin/bash
-        state: present
         create_home: yes
 
-    - name: Set up authorized_keys for the ansible user
+    - name: Add SSH public key
       authorized_key:
         user: "{{ ansible_user_name }}"
-        state: present
         key: "{{ awx_pub_key }}"
 
-    - name: Configure passwordless sudo for the ansible user
+    - name: Enable passwordless sudo
       copy:
-        content: "{{ ansible_user_name }} ALL=(ALL) NOPASSWD:ALL"
         dest: "/etc/sudoers.d/{{ ansible_user_name }}"
+        content: "{{ ansible_user_name }} ALL=(ALL) NOPASSWD:ALL"
         mode: '0440'
         validate: '/usr/sbin/visudo -cf %s'
 
-    - name: Ensure PubkeyAuthentication is enabled in sshd_config
+    - name: Ensure PubkeyAuthentication is enabled
       lineinfile:
         path: /etc/ssh/sshd_config
         regexp: '^#?PubkeyAuthentication'
         line: 'PubkeyAuthentication yes'
-      notify: Restart SSH
+      notify: restart ssh
 
   handlers:
-    - name: Restart SSH
+    - name: restart ssh
       service:
-        name: ssh
+        name: sshd
         state: restarted
