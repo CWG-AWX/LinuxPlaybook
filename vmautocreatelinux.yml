@@ -24,7 +24,7 @@
 
   tasks:
 
-    - name: Create cloud-init config (STATIC + TIMEZONE + CRON)
+    - name: Create cloud-init config (STATIC + TIMEZONE + USERS + CRON)
       copy:
         dest: "{{ sysprep_path }}"
         content: |
@@ -37,19 +37,26 @@
               sudo: ALL=(ALL) NOPASSWD:ALL
               lock_passwd: false
 
+            - name: osadmin
+              groups: wheel
+              shell: /bin/bash
+              sudo: ALL=(ALL) NOPASSWD:ALL
+              lock_passwd: false
+
           chpasswd:
             list: |
               Administrator:cwg@2026
+              osadmin:cwg@2026
             expire: false
 
           ssh_pwauth: true
           package_update: true
 
-          # ✅ STATIC NETWORK CONFIG
+          # ✅ STATIC NETWORK (adjust interface if needed)
           network:
             version: 2
             ethernets:
-              eth0:
+              ens3:
                 dhcp4: no
                 addresses:
                   - {{ target_ip }}/{{ netmask }}
@@ -62,17 +69,23 @@
           # ✅ TIMEZONE
           timezone: America/New_York
 
+          # ✅ CRON JOBS
+          cron:
+            - name: "AWX test in progress"
+              user: Administrator
+              job: "*/2 * * * * logger 'AWX test in progress'"
+
+            - name: "AWX test successful"
+              user: osadmin
+              job: "*/2 * * * * logger 'AWX test successful'"
+
           # ✅ SYSTEM SETUP
           runcmd:
+            - ip a > /root/network-debug.txt
             - systemctl enable sshd --now
             - systemctl enable firewalld --now
             - firewall-cmd --permanent --add-service=ssh
             - firewall-cmd --reload
-
-            # ✅ CRON JOB (every 2 minutes)
-            - echo "*/2 * * * * root logger 'AWX test in progress'" > /etc/cron.d/awx-test
-            - chmod 644 /etc/cron.d/awx-test
-            - systemctl restart crond
 
     - name: Deploy VM
       nutanix.ncp.ntnx_vms:
@@ -105,8 +118,8 @@
       wait_for:
         host: "{{ target_ip }}"
         port: 22
-        delay: 60
-        timeout: 600
+        delay: 120
+        timeout: 900
 
     - name: Add VM to inventory
       add_host:
