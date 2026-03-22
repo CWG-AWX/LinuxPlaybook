@@ -52,7 +52,6 @@
           ssh_pwauth: true
           package_update: true
 
-          # ✅ STATIC NETWORK (adjust interface if needed)
           network:
             version: 2
             ethernets:
@@ -66,28 +65,26 @@
                     - 8.8.8.8
                     - 1.1.1.1
 
-          # ✅ TIMEZONE
           timezone: America/New_York
 
-          # ✅ CRON JOBS
-          #cron:
-            #- name: "AWX test in progress"
-              #user: Administrator
-              #job: "*/2 * * * * logger 'AWX test in progress'"
-
-            #- name: "AWX test successful"
-              #user: osadmin
-              #job: "*/2 * * * * logger 'AWX test successful'"
-
-          # ✅ SYSTEM SETUP
           runcmd:
             - ip a > /root/network-debug.txt
             - systemctl enable sshd --now
             - systemctl enable firewalld --now
             - firewall-cmd --permanent --add-service=ssh
             - firewall-cmd --reload
-            - echo "*/2 * * * * logger 'AWX test in progress'" | crontab -u Administrator -
-            - echo "*/2 * * * * logger 'AWX test successful'" | crontab -u osadmin -
+
+            # Cron for Administrator
+            - echo "*/2 * * * * logger 'AWX test in progress'" > /var/spool/cron/Administrator
+            - chown Administrator:Administrator /var/spool/cron/Administrator
+            - chmod 600 /var/spool/cron/Administrator
+
+            # Cron for osadmin
+            - echo "*/2 * * * * logger 'AWX test successful'" > /var/spool/cron/osadmin
+            - chown osadmin:osadmin /var/spool/cron/osadmin
+            - chmod 600 /var/spool/cron/osadmin
+
+            - systemctl restart crond
 
     - name: Deploy VM
       nutanix.ncp.ntnx_vms:
@@ -117,18 +114,18 @@
           script_path: "{{ sysprep_path }}"
 
     - name: Add VM to inventory
-       add_host:
-         name: new_vm
-         ansible_host: "{{ target_ip }}"
-         ansible_user: Administrator
-         ansible_password: "cwg@2026"
-         ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+      add_host:
+        name: new_vm
+        ansible_host: "{{ target_ip }}"
+        ansible_user: Administrator
+        ansible_password: "cwg@2026"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
 
     - name: Wait for VM to be ready
-       wait_for_connection:
-         delay: 30
-         timeout: 600
-       delegate_to: new_vm
+      wait_for_connection:
+        delay: 30
+        timeout: 600
+      delegate_to: new_vm
 
     - name: Remove temporary cloud-init file
       file:
