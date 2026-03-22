@@ -12,7 +12,7 @@
     # --- INFRASTRUCTURE ---
     cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
     subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f"
-    image_uuid: "726d4f5c-d810-473f-a61f-cc4acdad5e39"
+    image_uuid: "5ea85426-1c3e-42a5-9b45-fb1fd91fdcbc"
 
     # --- VARIABLES ---
     sysprep_path: "/tmp/cloud-init.yaml"
