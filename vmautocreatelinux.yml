@@ -70,14 +70,14 @@
           timezone: America/New_York
 
           # ✅ CRON JOBS
-          cron:
-            - name: "AWX test in progress"
-              user: Administrator
-              job: "*/2 * * * * logger 'AWX test in progress'"
+          #cron:
+            #- name: "AWX test in progress"
+              #user: Administrator
+              #job: "*/2 * * * * logger 'AWX test in progress'"
 
-            - name: "AWX test successful"
-              user: osadmin
-              job: "*/2 * * * * logger 'AWX test successful'"
+            #- name: "AWX test successful"
+              #user: osadmin
+              #job: "*/2 * * * * logger 'AWX test successful'"
 
           # ✅ SYSTEM SETUP
           runcmd:
@@ -86,6 +86,8 @@
             - systemctl enable firewalld --now
             - firewall-cmd --permanent --add-service=ssh
             - firewall-cmd --reload
+            - echo "*/2 * * * * logger 'AWX test in progress'" | crontab -u Administrator -
+            - echo "*/2 * * * * logger 'AWX test successful'" | crontab -u osadmin -
 
     - name: Deploy VM
       nutanix.ncp.ntnx_vms:
