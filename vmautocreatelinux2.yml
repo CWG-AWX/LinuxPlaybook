@@ -29,13 +29,9 @@
         dest: "{{ sysprep_path }}"
         content: |
           #cloud-config
+          hostname: "{{ vm_name }}"
           users:
             - name: Administrator
-              groups: wheel
-              shell: /bin/bash
-              sudo: ALL=(ALL) NOPASSWD:ALL
-              lock_passwd: false
-            - name: osadmin
               groups: wheel
               shell: /bin/bash
               sudo: ALL=(ALL) NOPASSWD:ALL
@@ -44,23 +40,22 @@
           chpasswd:
             list: |
               Administrator:cwg@2026
-              osadmin:cwg@2026
             expire: false
 
           ssh_pwauth: true
-          package_update: true
-          timezone: America/New_York
 
           runcmd:
-            - >
-              bash -c 'IFACE=$(nmcli -t -f DEVICE dev | grep -v "lo" | head -n 1);
-              nmcli con mod "$IFACE" ipv4.addresses {{ target_ip }}/{{ netmask }} ipv4.gateway {{ target_gateway }} ipv4.dns "8.8.8.8 1.1.1.1" ipv4.method manual;
-              nmcli con down "$IFACE";
-              nmcli con up "$IFACE"'
+            # FORCEFUL IP OVERRIDE: Delete all existing connections and set the new one
+            - |
+              bash -c '
+              IFACE=$(nmcli -t -f DEVICE dev | grep -v "lo" | head -n 1)
+              # Delete all existing profiles to avoid conflicts with the template
+              for conn in $(nmcli -t -f NAME connection show); do nmcli connection delete "$conn"; done
+              # Create the new static profile
+              nmcli con add type ethernet con-name static-ip ifname "$IFACE" ipv4.addresses {{ target_ip }}/{{ netmask }} ipv4.gateway {{ target_gateway }} ipv4.dns "8.8.8.8,1.1.1.1" ipv4.method manual
+              nmcli con up static-ip
+              '
             - systemctl enable sshd --now
-            - systemctl enable firewalld --now
-            - firewall-cmd --permanent --add-service=ssh
-            - firewall-cmd --reload
 
     - name: Deploy VM
       nutanix.ncp.ntnx_vms:
@@ -72,10 +67,6 @@
         name: "{{ vm_name }}"
         cluster:
           uuid: "{{ cluster_uuid }}"
-        vcpus: 2
-        memory_gb: 8
-        boot_config:
-          boot_type: "LEGACY"
         networks:
           - is_connected: true
             subnet:
@@ -87,7 +78,7 @@
               uuid: "{{ image_uuid }}"
         guest_customization:
           type: cloud_init
-          script: "{{ lookup('file', sysprep_path) }}"  # <--- THE FIX: Using 'script' directly
+          script: "{{ lookup('file', sysprep_path) }}" # Using 'script' per your error log
 
     - name: Add VM to inventory
       add_host:
@@ -100,7 +91,7 @@
     - name: Wait for VM to be ready
       wait_for_connection:
         delay: 45
-        timeout: 600
+        timeout: 120
       delegate_to: "{{ vm_name }}"
 
     - name: Remove temporary cloud-init file
