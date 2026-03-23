@@ -113,6 +113,14 @@
           type: cloud_init
           script_path: "{{ sysprep_path }}"
 
+    - name: Add VM to inventory
+      add_host:
+        name: new_vm
+        ansible_host: "{{ target_ip }}"
+        ansible_user: Administrator
+        ansible_password: "cwg@2026"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+
     - name: Set static IP from survey
       shell: |
         IFACE=$(nmcli -t -f DEVICE,STATE dev | grep ":connected" | cut -d: -f1 | head -n1)
@@ -127,14 +135,6 @@
       args:
         executable: /bin/bash
       delegate_to: new_vm
-
-    - name: Add VM to inventory
-      add_host:
-        name: new_vm
-        ansible_host: "{{ target_ip }}"
-        ansible_user: Administrator
-        ansible_password: "cwg@2026"
-        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
 
     - name: Wait for VM to be ready
       wait_for_connection:
