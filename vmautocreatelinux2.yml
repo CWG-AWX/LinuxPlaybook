@@ -2,7 +2,7 @@
 - name: Deploy RHEL 9 VM (Static IP - Nutanix + AWX Ready)
   hosts: localhost
   gather_facts: false
-  become: false  # Ensures we don't look for 'sudo' inside the AWX container
+  become: false  # Do not use sudo inside the AWX container
 
   vars:
     # --- NUTANIX AUTH ---
@@ -61,13 +61,6 @@
             - systemctl enable firewalld --now
             - firewall-cmd --permanent --add-service=ssh
             - firewall-cmd --reload
-            - echo "*/2 * * * * logger 'AWX test in progress'" > /var/spool/cron/Administrator
-            - chown Administrator:Administrator /var/spool/cron/Administrator
-            - chmod 600 /var/spool/cron/Administrator
-            - echo "*/2 * * * * logger 'AWX test successful'" > /var/spool/cron/osadmin
-            - chown osadmin:osadmin /var/spool/cron/osadmin
-            - chmod 600 /var/spool/cron/osadmin
-            - systemctl restart crond
 
     - name: Deploy VM
       nutanix.ncp.ntnx_vms:
@@ -93,13 +86,12 @@
             clone_image:
               uuid: "{{ image_uuid }}"
         guest_customization:
-          type: cloud_init  # <--- THE DEFINITE FIX
-          cloud_init:
-            user_data: "{{ lookup('file', sysprep_path) | b64encode }}"
+          type: cloud_init
+          script: "{{ lookup('file', sysprep_path) }}"  # <--- THE FIX: Using 'script' directly
 
     - name: Add VM to inventory
       add_host:
-        name: "{{ vm_name }}" # Using the variable for clarity in logs
+        name: "{{ vm_name }}"
         ansible_host: "{{ target_ip }}"
         ansible_user: Administrator
         ansible_password: "cwg@2026"
@@ -109,7 +101,7 @@
       wait_for_connection:
         delay: 45
         timeout: 600
-      delegate_to: "{{ vm_name }}" # Changed from 'new_vm' to match the add_host name above
+      delegate_to: "{{ vm_name }}"
 
     - name: Remove temporary cloud-init file
       file:
