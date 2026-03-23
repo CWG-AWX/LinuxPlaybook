@@ -113,6 +113,21 @@
           type: cloud_init
           script_path: "{{ sysprep_path }}"
 
+    - name: Set static IP from survey
+      shell: |
+        IFACE=$(nmcli -t -f DEVICE,STATE dev | grep ":connected" | cut -d: -f1 | head -n1)
+
+        nmcli con mod "$IFACE" ipv4.addresses {{ target_ip }}/{{ netmask }}
+        nmcli con mod "$IFACE" ipv4.gateway {{ target_gateway }}
+        nmcli con mod "$IFACE" ipv4.dns "8.8.8.8 1.1.1.1"
+        nmcli con mod "$IFACE" ipv4.method manual
+
+        nmcli con down "$IFACE"
+        nmcli con up "$IFACE"
+      args:
+        executable: /bin/bash
+      delegate_to: new_vm
+
     - name: Add VM to inventory
       add_host:
         name: new_vm
