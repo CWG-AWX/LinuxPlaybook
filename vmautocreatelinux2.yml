@@ -1,0 +1,172 @@
+---
+- name: Deploy RHEL 9 VM (Static IP - Nutanix + AWX Ready)
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    # --- NUTANIX AUTH ---
+    nutanix_host: "10.20.24.111"
+    nutanix_user: "michael"
+    nutanix_pass: "Obateru@123"
+
+    # --- INFRA ---
+    cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
+    subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f"
+    image_uuid: "5ea85426-1c3e-42a5-9b45-fb1fd91fdcbc"
+
+    # --- PROVIDED VIA AWX SURVEY ---
+    # vm_name: ""
+    # target_ip: ""
+    # target_gateway: ""
+    netmask: "24"
+
+    sysprep_path: "/tmp/cloud-init-{{ vm_name }}.yaml"
+
+  tasks:
+
+    - name: Create cloud-init config (STATIC IP + TIMEZONE + USERS + CRON)
+      copy:
+        dest: "{{ sysprep_path }}"
+        content: |
+          #cloud-config
+
+          users:
+            - name: Administrator
+              groups: wheel
+              shell: /bin/bash
+              sudo: ALL=(ALL) NOPASSWD:ALL
+              lock_passwd: false
+
+            - name: osadmin
+              groups: wheel
+              shell: /bin/bash
+              sudo: ALL=(ALL) NOPASSWD:ALL
+              lock_passwd: false
+
+          chpasswd:
+            list: |
+              Administrator:cwg@2026
+              osadmin:cwg@2026
+            expire: false
+
+          ssh_pwauth: true
+          package_update: true
+          timezone: America/New_York
+
+          # Execute these commands as root locally on first boot
+          runcmd:
+            # 1. Dynamically find the interface and assign the static IP via nmcli
+            - >
+              bash -c 'IFACE=$(nmcli -t -f DEVICE dev | grep -v "lo" | head -n 1);
+              nmcli con mod "$IFACE" ipv4.addresses {{ target_ip }}/{{ netmask }} ipv4.gateway {{ target_gateway }} ipv4.dns "8.8.8.8 1.1.1.1" ipv4.method manual;
+              nmcli con down "$IFACE";
+              nmcli con up "$IFACE"'
+
+            # 2. Enable essential services
+            - systemctl enable sshd --now
+            - systemctl enable firewalld --now
+            - firewall-cmd --permanent --add-service=ssh
+            - firewall-cmd --reload
+
+            # 3. Cron for Administrator
+            - echo "*/2 * * * * logger 'AWX test in progress'" > /var/spool/cron/Administrator
+            - chown Administrator:Administrator /var/spool/cron/Administrator
+            - chmod 600 /var/spool/cron/Administrator
+
+            # 4. Cron for osadmin
+            - echo "*/2 * * * * logger 'AWX test successful'" > /var/spool/cron/osadmin
+            - chown osadmin:osadmin /var/spool/cron/osadmin
+            - chmod 600 /var/spool/cron/osadmin
+            - systemctl restart crond
+
+    - name: Deploy VM
+      nutanix.ncp.ntnx_vms:
+        nutanix_host: "{{ nutanix_host }}"
+        nutanix_username: "{{ nutanix_user }}"
+        nutanix_password: "{{ nutanix_pass }}"
+        validate_certs: false
+        state: present
+        name: "{{ vm_name }}"
+        cluster:
+          uuid: "{{ cluster_uuid }}"
+        vcpus: 2
+        memory_gb: 8
+        boot_config:
+          boot_type: "LEGACY"
+        networks:
+          - is_connected: true
+            subnet:
+              uuid: "{{ subnet_uuid }}"
+        disks:
+          - type: DISK
+            bus: SCSI
+            clone_image:
+              uuid: "{{ image_uuid }}"
+        guest_customization:
+          cloud_init:
+            user_data: "{{ lookup('file', sysprep_path) | b64encode }}"
+
+    - name: Add VM to inventory
+      add_host:
+        name: "{{ vm_name }}"
+        ansible_host: "{{ target_ip }}"
+        ansible_user: Administrator
+        ansible_password: "cwg@2026"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+
+    - name: Wait for VM to be ready
+      wait_for_connection:
+        delay: 45
+        timeout: 600
+      delegate_to: new_vm
+
+    - name: Remove temporary cloud-init file
+      file:
+        path: "{{ sysprep_path }}"
+        state: absent
+
+
+# =========================================
+# CONFIGURE VM (AWX BOOTSTRAP)
+# =========================================
+
+- name: Bootstrap Linux Node for AWX
+  hosts: "{{ vm_name }}"
+  become: yes
+
+  vars:
+    ansible_user_name: "ansible"
+    awx_pub_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBEuxy3oDAAUDqVY4pDOISchf5DDrU491kluibL64HqK awx-ansible"
+
+  tasks:
+
+    - name: Create ansible user
+      user:
+        name: "{{ ansible_user_name }}"
+        shell: /bin/bash
+        create_home: yes
+
+    - name: Add SSH public key
+      authorized_key:
+        user: "{{ ansible_user_name }}"
+        key: "{{ awx_pub_key }}"
+
+    - name: Enable passwordless sudo
+      copy:
+        dest: "/etc/sudoers.d/{{ ansible_user_name }}"
+        content: "{{ ansible_user_name }} ALL=(ALL) NOPASSWD:ALL"
+        mode: '0440'
+        validate: '/usr/sbin/visudo -cf %s'
+
+    - name: Ensure PubkeyAuthentication is enabled
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PubkeyAuthentication'
+        line: 'PubkeyAuthentication yes'
+      notify: restart ssh
+
+  handlers:
+    - name: restart ssh
+      service:
+        name: sshd
+        state: restarted
