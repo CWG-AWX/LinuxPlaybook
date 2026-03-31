@@ -1,0 +1,179 @@
+---
+- name: Deploy Ubuntu VM (Static IP - Nutanix + AWX Ready)
+  hosts: localhost
+  gather_facts: false
+  become: false  # Do not use sudo inside the AWX container
+
+  vars:
+    # --- NUTANIX AUTH ---
+    nutanix_host: "10.20.24.111"
+    nutanix_user: "michael"
+    nutanix_pass: "Obateru@123"
+
+    # --- INFRA ---
+    cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
+    subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f"
+    image_uuid: "2132090f-23e3-4e58-a5b7-e8ab6d1b969c" 
+
+    # --- PROVIDED VIA AWX SURVEY ---
+    # vm_name: ""
+    # target_ip: ""
+    # target_gateway: ""
+    netmask: "24"
+
+    sysprep_path: "/tmp/cloud-init-{{ vm_name }}.yaml"
+
+  tasks:
+    - name: Create cloud-init config
+      copy:
+        dest: "{{ sysprep_path }}"
+        content: |
+          #cloud-config
+          hostname: "{{ vm_name }}"
+
+          # Ubuntu uses 'ubuntu' as the default user; we create an 'Administrator' account
+          users:
+            - name: Administrator
+              groups: sudo
+              shell: /bin/bash
+              sudo: ALL=(ALL) NOPASSWD:ALL
+              lock_passwd: false
+
+          chpasswd:
+            list: |
+              Administrator:cwg@2026
+            expire: false
+
+          ssh_pwauth: true
+
+          # Ubuntu uses netplan instead of NetworkManager/nmcli
+          # cloud-init writes the netplan config directly on first boot
+          write_files:
+            - path: /etc/netplan/99-static.yaml
+              permissions: '0600'
+              content: |
+                network:
+                  version: 2
+                  ethernets:
+                    ens3:                          # Common NIC name on Nutanix/Ubuntu — verify with your image
+                      dhcp4: false
+                      addresses:
+                        - {{ target_ip }}/{{ netmask }}
+                      routes:
+                        - to: default
+                          via: {{ target_gateway }}
+                      nameservers:
+                        addresses:
+                          - 8.8.8.8
+                          - 1.1.1.1
+
+          runcmd:
+            # FORCEFUL IP OVERRIDE: Delete ALL existing netplan configs from the template image
+            # to guarantee no conflicts — equivalent to RHEL's 'nmcli connection delete' loop
+            - find /etc/netplan/ -name "*.yaml" ! -name "99-static.yaml" -delete
+            # Apply our clean static config as the sole network definition
+            - netplan apply
+            # Ensure SSH is running
+            - systemctl enable ssh --now
+
+    - name: Deploy VM
+      nutanix.ncp.ntnx_vms:
+        nutanix_host: "{{ nutanix_host }}"
+        nutanix_username: "{{ nutanix_user }}"
+        nutanix_password: "{{ nutanix_pass }}"
+        validate_certs: false
+        state: present
+        name: "{{ vm_name }}"
+        cluster:
+          uuid: "{{ cluster_uuid }}"
+        networks:
+          - is_connected: true
+            subnet:
+              uuid: "{{ subnet_uuid }}"
+        disks:
+          - type: DISK
+            bus: SCSI
+            clone_image:
+              uuid: "{{ image_uuid }}"
+        guest_customization:
+          type: cloud_init
+          script: "{{ lookup('file', sysprep_path) }}"
+
+    - name: Add VM to inventory
+      add_host:
+        name: "{{ vm_name }}"
+        ansible_host: "{{ target_ip }}"
+        ansible_user: Administrator
+        ansible_password: "cwg@2026"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+
+    - name: Wait for VM to be ready
+      wait_for_connection:
+        delay: 60         # Ubuntu cloud-init + netplan apply can take slightly longer than RHEL
+        timeout: 180
+      delegate_to: "{{ vm_name }}"
+
+    - name: Remove temporary cloud-init file
+      file:
+        path: "{{ sysprep_path }}"
+        state: absent
+
+# =========================================
+# CONFIGURE VM (AWX BOOTSTRAP)
+# =========================================
+
+- name: Bootstrap Ubuntu Node for AWX
+  hosts: "{{ vm_name }}"
+  become: yes
+
+  vars:
+    ansible_user_name: "ansible"
+    awx_pub_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBEuxy3oDAAUDqVY4pDOISchf5DDrU491kluibL64HqK awx-ansible"
+
+  tasks:
+    - name: Ensure python3 is present (Ubuntu minimal images may omit it)
+      apt:
+        name:
+          - python3
+          - python3-pip
+        state: present
+        update_cache: yes
+
+    - name: Create ansible user
+      user:
+        name: "{{ ansible_user_name }}"
+        shell: /bin/bash
+        create_home: yes
+
+    - name: Add SSH public key
+      authorized_key:
+        user: "{{ ansible_user_name }}"
+        key: "{{ awx_pub_key }}"
+
+    - name: Enable passwordless sudo
+      copy:
+        dest: "/etc/sudoers.d/{{ ansible_user_name }}"
+        content: "{{ ansible_user_name }} ALL=(ALL) NOPASSWD:ALL"
+        mode: '0440'
+        validate: '/usr/sbin/visudo -cf %s'
+
+    - name: Ensure PubkeyAuthentication is enabled
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PubkeyAuthentication'
+        line: 'PubkeyAuthentication yes'
+      notify: restart ssh
+
+    # Ubuntu uses ufw; open SSH port so future AWX connections are never blocked
+    - name: Allow SSH through UFW
+      ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
+      ignore_errors: yes   # UFW may not be active; non-fatal
+
+  handlers:
+    - name: restart ssh
+      service:
+        name: ssh        # Ubuntu service name is 'ssh', not 'sshd'
+        state: restarted
