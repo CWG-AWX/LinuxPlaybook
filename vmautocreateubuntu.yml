@@ -145,12 +145,23 @@
         line: 'PubkeyAuthentication yes'
       notify: restart ssh
 
-    - name: Allow SSH through UFW
-      ufw:
-        rule: allow
-        port: '22'
-        proto: tcp
-      ignore_errors: yes
+    - name: Install firewalld
+      apt:
+        name: firewalld
+        state: present
+
+    - name: Enable and start firewalld
+      service:
+        name: firewalld
+        state: started
+        enabled: yes
+
+    - name: Allow SSH through firewalld
+      firewalld:
+        service: ssh
+        permanent: true
+        state: enabled
+        immediate: true
 
   handlers:
     - name: restart ssh
