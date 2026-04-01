@@ -17,7 +17,6 @@
 
     # --- AWX SURVEY INPUTS ---
     # vm_name: ""
-    # vm_hostname: ""
     # target_ip: ""
     # target_gateway: ""
     netmask: "24"
@@ -25,17 +24,15 @@
     sysprep_path: "/tmp/cloud-init-{{ vm_name }}.yaml"
 
   tasks:
-    # =========================================
-    # CREATE CLOUD-INIT
-    # =========================================
+
     - name: Create cloud-init config
       copy:
         dest: "{{ sysprep_path }}"
         content: |
           #cloud-config
           preserve_hostname: false
-          hostname: "{{ vm_hostname }}"
-          fqdn: "{{ vm_hostname }}"
+          hostname: "{{ vm_name }}"
+          fqdn: "{{ vm_name }}"
 
           users:
             - name: Administrator
@@ -54,19 +51,12 @@
           runcmd:
             - |
               bash -c '
-              # ===============================
-              # FORCE HOSTNAME OVERRIDE
-              # ===============================
-              echo "{{ vm_hostname }}" > /etc/hostname
-              hostnamectl set-hostname "{{ vm_hostname }}"
+              # FORCE HOSTNAME (VM NAME = HOSTNAME)
+              echo "{{ vm_name }}" > /etc/hostname
+              hostnamectl set-hostname "{{ vm_name }}"
               systemctl restart systemd-hostnamed
 
-              # remove any cloud-init hostname caching
-              rm -f /etc/cloud/cloud.cfg.d/*hostname* 2>/dev/null
-
-              # ===============================
-              # FORCE NETWORK OVERRIDE
-              # ===============================
+              # FORCE NETWORK
               IFACE=$(nmcli -t -f DEVICE dev | grep -v "lo" | head -n 1)
 
               for conn in $(nmcli -t -f NAME connection show); do
@@ -84,9 +74,6 @@
 
             - systemctl enable sshd --now
 
-    # =========================================
-    # DEPLOY VM
-    # =========================================
     - name: Deploy VM
       nutanix.ncp.ntnx_vms:
         nutanix_host: "{{ nutanix_host }}"
@@ -110,9 +97,6 @@
           type: cloud_init
           script: "{{ lookup('file', sysprep_path) }}"
 
-    # =========================================
-    # ADD TO INVENTORY
-    # =========================================
     - name: Add VM to inventory
       add_host:
         name: "{{ vm_name }}"
@@ -121,25 +105,19 @@
         ansible_password: "cwg@2026"
         ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
 
-    # =========================================
-    # WAIT FOR VM
-    # =========================================
     - name: Wait for VM to be ready
       wait_for_connection:
         delay: 45
         timeout: 120
       delegate_to: "{{ vm_name }}"
 
-    # =========================================
-    # CLEANUP
-    # =========================================
-    - name: Remove temporary cloud-init file
+    - name: Remove temp cloud-init file
       file:
         path: "{{ sysprep_path }}"
         state: absent
 
 # =========================================
-# POST CONFIGURATION (BOOTSTRAP)
+# POST CONFIG
 # =========================================
 - name: Bootstrap Linux Node for AWX
   hosts: "{{ vm_name }}"
@@ -150,25 +128,26 @@
     awx_pub_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBEuxy3oDAAUDqVY4pDOISchf5DDrU491kluibL64HqK awx-ansible"
 
   tasks:
+
     - name: Create ansible user
       user:
         name: "{{ ansible_user_name }}"
         shell: /bin/bash
         create_home: yes
 
-    - name: Add SSH public key
+    - name: Add SSH key
       authorized_key:
         user: "{{ ansible_user_name }}"
         key: "{{ awx_pub_key }}"
 
-    - name: Enable passwordless sudo
+    - name: Enable sudo
       copy:
         dest: "/etc/sudoers.d/{{ ansible_user_name }}"
         content: "{{ ansible_user_name }} ALL=(ALL) NOPASSWD:ALL"
         mode: '0440'
         validate: '/usr/sbin/visudo -cf %s'
 
-    - name: Ensure PubkeyAuthentication is enabled
+    - name: Enable SSH pubkey auth
       lineinfile:
         path: /etc/ssh/sshd_config
         regexp: '^#?PubkeyAuthentication'
