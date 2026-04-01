@@ -1,5 +1,5 @@
 ---
-- name: Deploy RHEL 9 VM (Static IP - Nutanix + AWX Ready)
+- name: Deploy Ubuntu VM (Static IP - Nutanix + AWX Ready)
   hosts: localhost
   gather_facts: false
   become: false
@@ -13,7 +13,7 @@
     # --- INFRA ---
     cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
     subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f"
-    image_uuid: "2132090f-23e3-4e58-a5b7-e8ab6d1b969c"
+    image_uuid: "5ea85426-1c3e-42a5-9b45-fb1fd91fdcbc"
 
     # --- AWX SURVEY INPUTS ---
     # vm_name: ""
@@ -35,44 +35,66 @@
           fqdn: "{{ vm_name }}"
 
           users:
-            - name: Administrator
-              groups: wheel
+            - name: ubuntu
+              groups: sudo           # Ubuntu uses 'sudo' group, not 'wheel'
               shell: /bin/bash
               sudo: ALL=(ALL) NOPASSWD:ALL
               lock_passwd: false
 
           chpasswd:
             list: |
-              Administrator:cwg@2026
+              ubuntu:cwg@2026
             expire: false
 
           ssh_pwauth: true
 
+          # Disable cloud-init network management so our Netplan config takes over
+          network:
+            config: disabled
+
           runcmd:
             - |
               bash -c '
-              # FORCE HOSTNAME (VM NAME = HOSTNAME)
+              # FORCE HOSTNAME
               echo "{{ vm_name }}" > /etc/hostname
               hostnamectl set-hostname "{{ vm_name }}"
               systemctl restart systemd-hostnamed
 
-              # FORCE NETWORK
-              IFACE=$(nmcli -t -f DEVICE dev | grep -v "lo" | head -n 1)
+              # GET PRIMARY INTERFACE (first non-loopback)
+              IFACE=$(ip -o link show | awk -F": " '\''{print $2}'\'' | grep -v "lo" | head -n 1)
 
-              for conn in $(nmcli -t -f NAME connection show); do
-                nmcli connection delete "$conn"
-              done
+              # FLUSH ALL IP ADDRESSES AND ROUTES ON THE INTERFACE
+              ip addr flush dev "$IFACE"
+              ip route flush dev "$IFACE"
 
-              nmcli con add type ethernet con-name static-ip ifname "$IFACE" \
-                ipv4.addresses {{ target_ip }}/{{ netmask }} \
-                ipv4.gateway {{ target_gateway }} \
-                ipv4.dns "8.8.8.8,1.1.1.1" \
-                ipv4.method manual
+              # NUKE ALL EXISTING NETPLAN CONFIGS (equivalent to nmcli connection delete in RHEL)
+              rm -f /etc/netplan/*.yaml
+              rm -f /etc/netplan/*.yml
 
-              nmcli con up static-ip
+              # WRITE FRESH STATIC NETPLAN CONFIG
+              cat > /etc/netplan/99-static.yaml <<EOF
+              network:
+                version: 2
+                ethernets:
+                  ${IFACE}:
+                    addresses:
+                      - {{ target_ip }}/{{ netmask }}
+                    routes:
+                      - to: default
+                        via: {{ target_gateway }}
+                    nameservers:
+                      addresses: [8.8.8.8, 1.1.1.1]
+              EOF
+
+              chmod 600 /etc/netplan/99-static.yaml
+
+              # APPLY NEW CONFIG
+              netplan generate
+              netplan apply
               '
 
-            - systemctl enable sshd --now
+            # Ubuntu SSH service is named "ssh", not "sshd"
+            - systemctl enable ssh --now
 
     - name: Deploy VM
       nutanix.ncp.ntnx_vms:
@@ -101,7 +123,7 @@
       add_host:
         name: "{{ vm_name }}"
         ansible_host: "{{ target_ip }}"
-        ansible_user: Administrator
+        ansible_user: ubuntu              # Ubuntu default cloud user
         ansible_password: "cwg@2026"
         ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
 
@@ -119,7 +141,7 @@
 # =========================================
 # POST CONFIG
 # =========================================
-- name: Bootstrap Linux Node for AWX
+- name: Bootstrap Ubuntu Node for AWX
   hosts: "{{ vm_name }}"
   become: yes
 
@@ -148,14 +170,15 @@
         validate: '/usr/sbin/visudo -cf %s'
 
     - name: Enable SSH pubkey auth
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^#?PubkeyAuthentication'
-        line: 'PubkeyAuthentication yes'
+      # Ubuntu 22.04+ uses drop-in config files under sshd_config.d/
+      copy:
+        dest: /etc/ssh/sshd_config.d/90-pubkey.conf
+        content: "PubkeyAuthentication yes\n"
+        mode: '0644'
       notify: restart ssh
 
   handlers:
     - name: restart ssh
       service:
-        name: sshd
+        name: ssh          # Ubuntu service name is 'ssh', not 'sshd'
         state: restarted
