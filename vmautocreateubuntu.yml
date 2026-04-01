@@ -59,10 +59,17 @@
                         addresses:
                           - 8.8.8.8
                           - 1.1.1.1
+          bootcmd:
+            - apt-get update -y
+            - apt-get install -y ufw
+
           runcmd:
+            - ufw allow OpenSSH
+            - ufw --force enable
             - find /etc/netplan/ -name "*.yaml" ! -name "99-static.yaml" -delete
             - netplan apply
             - systemctl enable ssh --now
+
 
     - name: Deploy VM
       nutanix.ncp.ntnx_vms:
@@ -119,7 +126,6 @@
     awx_pub_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBEuxy3oDAAUDqVY4pDOISchf5DDrU491kluibL64HqK awx-ansible"
 
   tasks:
-
     - name: Create ansible user
       user:
         name: "{{ ansible_user_name }}"
@@ -144,24 +150,6 @@
         regexp: '^#?PubkeyAuthentication'
         line: 'PubkeyAuthentication yes'
       notify: restart ssh
-
-    - name: Install firewalld
-      apt:
-        name: firewalld
-        state: present
-
-    - name: Enable and start firewalld
-      service:
-        name: firewalld
-        state: started
-        enabled: yes
-
-    - name: Allow SSH through firewalld
-      firewalld:
-        service: ssh
-        permanent: true
-        state: enabled
-        immediate: true
 
   handlers:
     - name: restart ssh
