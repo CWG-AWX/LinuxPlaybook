@@ -119,13 +119,6 @@
     awx_pub_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBEuxy3oDAAUDqVY4pDOISchf5DDrU491kluibL64HqK awx-ansible"
 
   tasks:
-    - name: Ensure python3 is present
-      apt:
-        name:
-          - python3
-          - python3-pip
-        state: present
-        update_cache: yes
 
     - name: Create ansible user
       user:
