@@ -15,7 +15,7 @@
     subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f"
     image_uuid: "5ea85426-1c3e-42a5-9b45-fb1fd91fdcbc"
 
-    # --- PROVIDED VIA AWX SURVEY ---
+    # --- AWX SURVEY INPUTS ---
     # vm_name: ""
     # vm_hostname: ""
     # target_ip: ""
@@ -25,12 +25,18 @@
     sysprep_path: "/tmp/cloud-init-{{ vm_name }}.yaml"
 
   tasks:
+    # =========================================
+    # CREATE CLOUD-INIT
+    # =========================================
     - name: Create cloud-init config
       copy:
         dest: "{{ sysprep_path }}"
         content: |
           #cloud-config
+          preserve_hostname: false
           hostname: "{{ vm_hostname }}"
+          fqdn: "{{ vm_hostname }}"
+
           users:
             - name: Administrator
               groups: wheel
@@ -48,13 +54,39 @@
           runcmd:
             - |
               bash -c '
+              # ===============================
+              # FORCE HOSTNAME OVERRIDE
+              # ===============================
+              echo "{{ vm_hostname }}" > /etc/hostname
+              hostnamectl set-hostname "{{ vm_hostname }}"
+              systemctl restart systemd-hostnamed
+
+              # remove any cloud-init hostname caching
+              rm -f /etc/cloud/cloud.cfg.d/*hostname* 2>/dev/null
+
+              # ===============================
+              # FORCE NETWORK OVERRIDE
+              # ===============================
               IFACE=$(nmcli -t -f DEVICE dev | grep -v "lo" | head -n 1)
-              for conn in $(nmcli -t -f NAME connection show); do nmcli connection delete "$conn"; done
-              nmcli con add type ethernet con-name static-ip ifname "$IFACE" ipv4.addresses {{ target_ip }}/{{ netmask }} ipv4.gateway {{ target_gateway }} ipv4.dns "8.8.8.8,1.1.1.1" ipv4.method manual
+
+              for conn in $(nmcli -t -f NAME connection show); do
+                nmcli connection delete "$conn"
+              done
+
+              nmcli con add type ethernet con-name static-ip ifname "$IFACE" \
+                ipv4.addresses {{ target_ip }}/{{ netmask }} \
+                ipv4.gateway {{ target_gateway }} \
+                ipv4.dns "8.8.8.8,1.1.1.1" \
+                ipv4.method manual
+
               nmcli con up static-ip
               '
+
             - systemctl enable sshd --now
 
+    # =========================================
+    # DEPLOY VM
+    # =========================================
     - name: Deploy VM
       nutanix.ncp.ntnx_vms:
         nutanix_host: "{{ nutanix_host }}"
@@ -78,6 +110,9 @@
           type: cloud_init
           script: "{{ lookup('file', sysprep_path) }}"
 
+    # =========================================
+    # ADD TO INVENTORY
+    # =========================================
     - name: Add VM to inventory
       add_host:
         name: "{{ vm_name }}"
@@ -86,21 +121,26 @@
         ansible_password: "cwg@2026"
         ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
 
+    # =========================================
+    # WAIT FOR VM
+    # =========================================
     - name: Wait for VM to be ready
       wait_for_connection:
         delay: 45
         timeout: 120
       delegate_to: "{{ vm_name }}"
 
+    # =========================================
+    # CLEANUP
+    # =========================================
     - name: Remove temporary cloud-init file
       file:
         path: "{{ sysprep_path }}"
         state: absent
 
 # =========================================
-# CONFIGURE VM (AWX BOOTSTRAP)
+# POST CONFIGURATION (BOOTSTRAP)
 # =========================================
-
 - name: Bootstrap Linux Node for AWX
   hosts: "{{ vm_name }}"
   become: yes
