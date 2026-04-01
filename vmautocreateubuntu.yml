@@ -2,7 +2,7 @@
 - name: Deploy Ubuntu VM (Static IP - Nutanix + AWX Ready)
   hosts: localhost
   gather_facts: false
-  become: false  # Do not use sudo inside the AWX container
+  become: false
 
   vars:
     # --- NUTANIX AUTH ---
@@ -13,7 +13,7 @@
     # --- INFRA ---
     cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
     subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f"
-    image_uuid: "2132090f-23e3-4e58-a5b7-e8ab6d1b969c" 
+    image_uuid: "2132090f-23e3-4e58-a5b7-e8ab6d1b969c"
 
     # --- PROVIDED VIA AWX SURVEY ---
     # vm_name: ""
@@ -30,24 +30,17 @@
         content: |
           #cloud-config
           hostname: "{{ vm_name }}"
-
-          # Ubuntu uses 'ubuntu' as the default user; we create an 'Administrator' account
           users:
             - name: Administrator
               groups: sudo
               shell: /bin/bash
               sudo: ALL=(ALL) NOPASSWD:ALL
               lock_passwd: false
-
           chpasswd:
             list: |
               Administrator:cwg@2026
             expire: false
-
           ssh_pwauth: true
-
-          # Ubuntu uses netplan instead of NetworkManager/nmcli
-          # cloud-init writes the netplan config directly on first boot
           write_files:
             - path: /etc/netplan/99-static.yaml
               permissions: '0600'
@@ -55,7 +48,7 @@
                 network:
                   version: 2
                   ethernets:
-                    ens3:                          # Common NIC name on Nutanix/Ubuntu — verify with your image
+                    ens3:
                       dhcp4: false
                       addresses:
                         - {{ target_ip }}/{{ netmask }}
@@ -66,14 +59,9 @@
                         addresses:
                           - 8.8.8.8
                           - 1.1.1.1
-
           runcmd:
-            # FORCEFUL IP OVERRIDE: Delete ALL existing netplan configs from the template image
-            # to guarantee no conflicts — equivalent to RHEL's 'nmcli connection delete' loop
             - find /etc/netplan/ -name "*.yaml" ! -name "99-static.yaml" -delete
-            # Apply our clean static config as the sole network definition
             - netplan apply
-            # Ensure SSH is running
             - systemctl enable ssh --now
 
     - name: Deploy VM
@@ -109,7 +97,7 @@
 
     - name: Wait for VM to be ready
       wait_for_connection:
-        delay: 60         # Ubuntu cloud-init + netplan apply can take slightly longer than RHEL
+        delay: 60
         timeout: 180
       delegate_to: "{{ vm_name }}"
 
@@ -131,7 +119,7 @@
     awx_pub_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBEuxy3oDAAUDqVY4pDOISchf5DDrU491kluibL64HqK awx-ansible"
 
   tasks:
-    - name: Ensure python3 is present (Ubuntu minimal images may omit it)
+    - name: Ensure python3 is present
       apt:
         name:
           - python3
@@ -164,16 +152,15 @@
         line: 'PubkeyAuthentication yes'
       notify: restart ssh
 
-    # Ubuntu uses ufw; open SSH port so future AWX connections are never blocked
     - name: Allow SSH through UFW
       ufw:
         rule: allow
         port: '22'
         proto: tcp
-      ignore_errors: yes   # UFW may not be active; non-fatal
+      ignore_errors: yes
 
   handlers:
     - name: restart ssh
       service:
-        name: ssh        # Ubuntu service name is 'ssh', not 'sshd'
+        name: ssh
         state: restarted
