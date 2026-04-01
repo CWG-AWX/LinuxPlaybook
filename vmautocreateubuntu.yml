@@ -1,5 +1,5 @@
 ---
-- name: Deploy Ubuntu VM (Static IP - Nutanix + AWX Ready)
+- name: Deploy RHEL 9 VM (Static IP - Nutanix + AWX Ready)
   hosts: localhost
   gather_facts: false
   become: false
@@ -15,7 +15,7 @@
     subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f"
     image_uuid: "2132090f-23e3-4e58-a5b7-e8ab6d1b969c"
 
-    # --- PROVIDED VIA AWX SURVEY ---
+    # --- AWX SURVEY INPUTS ---
     # vm_name: ""
     # target_ip: ""
     # target_gateway: ""
@@ -24,52 +24,55 @@
     sysprep_path: "/tmp/cloud-init-{{ vm_name }}.yaml"
 
   tasks:
+
     - name: Create cloud-init config
       copy:
         dest: "{{ sysprep_path }}"
         content: |
           #cloud-config
+          preserve_hostname: false
           hostname: "{{ vm_name }}"
+          fqdn: "{{ vm_name }}"
+
           users:
             - name: Administrator
-              groups: sudo
+              groups: wheel
               shell: /bin/bash
               sudo: ALL=(ALL) NOPASSWD:ALL
               lock_passwd: false
+
           chpasswd:
             list: |
               Administrator:cwg@2026
             expire: false
+
           ssh_pwauth: true
-          write_files:
-            - path: /etc/netplan/99-static.yaml
-              permissions: '0600'
-              content: |
-                network:
-                  version: 2
-                  ethernets:
-                    ens3:
-                      dhcp4: false
-                      addresses:
-                        - {{ target_ip }}/{{ netmask }}
-                      routes:
-                        - to: default
-                          via: {{ target_gateway }}
-                      nameservers:
-                        addresses:
-                          - 8.8.8.8
-                          - 1.1.1.1
-          bootcmd:
-            - apt-get update -y
-            - apt-get install -y ufw
 
           runcmd:
-            - ufw allow OpenSSH
-            - ufw --force enable
-            - find /etc/netplan/ -name "*.yaml" ! -name "99-static.yaml" -delete
-            - netplan apply
-            - systemctl enable ssh --now
+            - |
+              bash -c '
+              # FORCE HOSTNAME (VM NAME = HOSTNAME)
+              echo "{{ vm_name }}" > /etc/hostname
+              hostnamectl set-hostname "{{ vm_name }}"
+              systemctl restart systemd-hostnamed
 
+              # FORCE NETWORK
+              IFACE=$(nmcli -t -f DEVICE dev | grep -v "lo" | head -n 1)
+
+              for conn in $(nmcli -t -f NAME connection show); do
+                nmcli connection delete "$conn"
+              done
+
+              nmcli con add type ethernet con-name static-ip ifname "$IFACE" \
+                ipv4.addresses {{ target_ip }}/{{ netmask }} \
+                ipv4.gateway {{ target_gateway }} \
+                ipv4.dns "8.8.8.8,1.1.1.1" \
+                ipv4.method manual
+
+              nmcli con up static-ip
+              '
+
+            - systemctl enable sshd --now
 
     - name: Deploy VM
       nutanix.ncp.ntnx_vms:
@@ -104,20 +107,19 @@
 
     - name: Wait for VM to be ready
       wait_for_connection:
-        delay: 60
-        timeout: 180
+        delay: 45
+        timeout: 120
       delegate_to: "{{ vm_name }}"
 
-    - name: Remove temporary cloud-init file
+    - name: Remove temp cloud-init file
       file:
         path: "{{ sysprep_path }}"
         state: absent
 
 # =========================================
-# CONFIGURE VM (AWX BOOTSTRAP)
+# POST CONFIG
 # =========================================
-
-- name: Bootstrap Ubuntu Node for AWX
+- name: Bootstrap Linux Node for AWX
   hosts: "{{ vm_name }}"
   become: yes
 
@@ -126,25 +128,26 @@
     awx_pub_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBEuxy3oDAAUDqVY4pDOISchf5DDrU491kluibL64HqK awx-ansible"
 
   tasks:
+
     - name: Create ansible user
       user:
         name: "{{ ansible_user_name }}"
         shell: /bin/bash
         create_home: yes
 
-    - name: Add SSH public key
+    - name: Add SSH key
       authorized_key:
         user: "{{ ansible_user_name }}"
         key: "{{ awx_pub_key }}"
 
-    - name: Enable passwordless sudo
+    - name: Enable sudo
       copy:
         dest: "/etc/sudoers.d/{{ ansible_user_name }}"
         content: "{{ ansible_user_name }} ALL=(ALL) NOPASSWD:ALL"
         mode: '0440'
         validate: '/usr/sbin/visudo -cf %s'
 
-    - name: Ensure PubkeyAuthentication is enabled
+    - name: Enable SSH pubkey auth
       lineinfile:
         path: /etc/ssh/sshd_config
         regexp: '^#?PubkeyAuthentication'
@@ -154,5 +157,5 @@
   handlers:
     - name: restart ssh
       service:
-        name: ssh
+        name: sshd
         state: restarted
