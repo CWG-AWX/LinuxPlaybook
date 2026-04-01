@@ -1,0 +1,69 @@
+---
+- name: Install and Configure CrowdStrike Falcon Sensor (Offline)
+  hosts: all
+  become: yes
+  
+  vars:
+    falcon_cid: "712BFC65A93944C0A66711B2541AC1D3-4B"
+    
+    # Map the RPM filenames to the major version
+    # Update these filenames to match exactly what you have in your AWX file store
+    falcon_rpm_map:
+      "8": "falcon-sensor-7.34.0-18708.el8.x86_64.rpm"
+      "9": "falcon-sensor-7.34.0-18708.el9.x86_64.rpm"
+
+  tasks:
+    - name: Gather OS-specific facts
+      ansible.builtin.setup:
+        filter: ansible_distribution_major_version
+
+    - name: Set target RPM filename
+      ansible.builtin.set_fact:
+        target_rpm: "{{ falcon_rpm_map[ansible_distribution_major_version] }}"
+
+    - name: Ensure /opt directory exists
+      ansible.builtin.file:
+        path: /opt
+        state: directory
+        mode: '0755'
+
+    - name: Copy the Falcon RPM to /opt
+      ansible.builtin.copy:
+        src: "{{ target_rpm }}"
+        dest: "/opt/{{ target_rpm }}"
+        mode: '0644'
+
+    - name: Install the Falcon Sensor RPM (Offline Mode)
+      ansible.builtin.dnf:
+        name: "/opt/{{ target_rpm }}"
+        state: present
+        disable_gpg_check: yes
+        disablerepo: "*"  # <--- THE DEFINITE FIX: Prevents trying to reach RHN/Internet
+      register: rpm_install
+
+    - name: Configure Falcon Sensor with CID
+      ansible.builtin.command:
+        cmd: "/opt/CrowdStrike/falconctl -s --cid={{ falcon_cid }}"
+      register: falcon_config
+      # Only run if the package was just installed or if config is missing
+      changed_when: "'Commit successful' in falcon_config.stdout"
+      failed_when: 
+        - falcon_config.rc != 0
+        - "'already set' not in falcon_config.stderr"
+
+    - name: Start and Enable Falcon Sensor service
+      ansible.builtin.systemd:
+        name: falcon-sensor
+        state: started
+        enabled: yes
+
+    - name: Check Falcon Sensor status
+      ansible.builtin.command:
+        cmd: "systemctl is-active falcon-sensor.service"
+      register: sensor_active
+      changed_when: false
+      failed_when: false
+
+    - name: Display Sensor Status
+      ansible.builtin.debug:
+        msg: "Falcon Sensor is {{ sensor_active.stdout }}"
