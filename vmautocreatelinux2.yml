@@ -2,7 +2,7 @@
 - name: Deploy RHEL 9 VM (Static IP - Nutanix + AWX Ready)
   hosts: localhost
   gather_facts: false
-  become: false  # Do not use sudo inside the AWX container
+  become: false
 
   vars:
     # --- NUTANIX AUTH ---
@@ -17,6 +17,7 @@
 
     # --- PROVIDED VIA AWX SURVEY ---
     # vm_name: ""
+    # vm_hostname: ""
     # target_ip: ""
     # target_gateway: ""
     netmask: "24"
@@ -29,7 +30,7 @@
         dest: "{{ sysprep_path }}"
         content: |
           #cloud-config
-          hostname: "{{ vm_name }}"
+          hostname: "{{ vm_hostname }}"
           users:
             - name: Administrator
               groups: wheel
@@ -45,13 +46,10 @@
           ssh_pwauth: true
 
           runcmd:
-            # FORCEFUL IP OVERRIDE: Delete all existing connections and set the new one
             - |
               bash -c '
               IFACE=$(nmcli -t -f DEVICE dev | grep -v "lo" | head -n 1)
-              # Delete all existing profiles to avoid conflicts with the template
               for conn in $(nmcli -t -f NAME connection show); do nmcli connection delete "$conn"; done
-              # Create the new static profile
               nmcli con add type ethernet con-name static-ip ifname "$IFACE" ipv4.addresses {{ target_ip }}/{{ netmask }} ipv4.gateway {{ target_gateway }} ipv4.dns "8.8.8.8,1.1.1.1" ipv4.method manual
               nmcli con up static-ip
               '
@@ -78,7 +76,7 @@
               uuid: "{{ image_uuid }}"
         guest_customization:
           type: cloud_init
-          script: "{{ lookup('file', sysprep_path) }}" # Using 'script' per your error log
+          script: "{{ lookup('file', sysprep_path) }}"
 
     - name: Add VM to inventory
       add_host:
