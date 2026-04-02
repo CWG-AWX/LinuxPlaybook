@@ -1,0 +1,63 @@
+---
+- name: Install CrowdStrike Falcon - Multi-OS Offline Version
+  hosts: all
+  become: yes
+  
+  vars:
+    falcon_cid: "712BFC65A93944C0A66711B2541AC1D3-4B"
+    
+    # This map ensures RHEL 8 gets the EL8 file and RHEL 9 gets the EL9 file
+    falcon_rpm_map:
+      "8": "falcon-sensor-7.34.0-18708.el8.x86_64.rpm"
+      "9": "falcon-sensor-7.34.0-18708.el9.x86_64.rpm"
+
+  tasks:
+    - name: Detect RHEL Major Version
+      ansible.builtin.set_fact:
+        target_rpm: "{{ falcon_rpm_map[ansible_distribution_major_version] }}"
+
+    - name: Ensure /opt directory exists
+      ansible.builtin.file:
+        path: /opt
+        state: directory
+        mode: '0755'
+
+    - name: Copy the correct RPM to the server
+      ansible.builtin.copy:
+        src: "{{ target_rpm }}"
+        dest: "/opt/{{ target_rpm }}"
+        mode: '0644'
+
+    - name: Install Falcon Sensor (FORCED OFFLINE)
+      ansible.builtin.dnf:
+        name: "/opt/{{ target_rpm }}"
+        state: present
+        disable_gpg_check: yes
+        disablerepo: "*"  # <--- This stops the "Cannot download metadata" error
+      register: install_result
+
+    - name: Configure Falcon CID
+      ansible.builtin.command:
+        cmd: "/opt/CrowdStrike/falconctl -s --cid={{ falcon_cid }}"
+      register: falcon_config
+      # Only show 'changed' if we actually applied the CID successfully
+      changed_when: "'Commit successful' in falcon_config.stdout"
+      failed_when: 
+        - falcon_config.rc != 0
+        - "'already set' not in falcon_config.stderr"
+
+    - name: Start and Enable Falcon Sensor
+      ansible.builtin.systemd:
+        name: falcon-sensor
+        state: started
+        enabled: yes
+
+    - name: Verify Agent is Active
+      ansible.builtin.command:
+        cmd: "systemctl is-active falcon-sensor.service"
+      register: sensor_status
+      changed_when: false
+
+    - name: Final Status
+      ansible.builtin.debug:
+        msg: "Falcon is {{ sensor_status.stdout }} on {{ inventory_hostname }} (RHEL {{ ansible_distribution_major_version }})"
