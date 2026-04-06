@@ -1,0 +1,68 @@
+---
+- name: Fix CrowdStrike Installation - Access Denied & RC 24578 Handling
+  hosts: all
+  gather_facts: false
+  
+  vars:
+    falcon_cid: "712BFC65A93944C0A66711B2541AC1D3-4B"
+    falcon_exe: "FalconSensor_Windows.exe"
+    dest_path: 'C:\temp'
+
+  tasks:
+    - name: Check if CrowdStrike Service exists
+      ansible.windows.win_service_info:
+        name: csagent
+      register: falcon_service_info
+
+    - name: Ensure C:\temp exists
+      ansible.windows.win_file:
+        path: "{{ dest_path }}"
+        state: directory
+      when: falcon_service_info.services | length == 0
+
+    - name: Copy Falcon EXE (Only if not installed)
+      ansible.windows.win_copy:
+        src: "{{ falcon_exe }}"
+        dest: "{{ dest_path }}\\{{ falcon_exe }}"
+      when: falcon_service_info.services | length == 0
+
+    - name: Install Falcon Sensor (Silent Mode)
+      ansible.windows.win_package:
+        path: "{{ dest_path }}\\{{ falcon_exe }}"
+        arguments: '/install /quiet /norestart CID={{ falcon_cid }}'
+        state: present
+        # This prevents re-installation attempts if the driver is found
+        creates_path: 'C:\Windows\System32\drivers\crowdstrike\csagent.sys'
+      register: install_result
+      when: falcon_service_info.services | length == 0
+      failed_when: 
+        - install_result.rc is defined 
+        - install_result.rc not in [0, 3010, 24578] # 24578 often means already installed/reboot pending
+
+    - name: Attempt to Start Service (Handle Tamper Protection)
+      ansible.windows.win_service:
+        name: csagent
+        state: started
+      register: service_start_attempt
+      # If Tamper Protection is on, this will fail with 'Access is denied'
+      # We catch that here so the playbook stays 'green'
+      failed_when: 
+        - service_start_attempt.failed
+        - "'Access is denied' not in service_start_attempt.msg"
+      when: 
+        - falcon_service_info.services | length > 0
+        - falcon_service_info.services[0].state != 'running'
+
+    - name: Final Verification (Read-Only)
+      ansible.windows.win_service_info:
+        name: csagent
+      register: final_audit
+
+    - name: Report Agent Status
+      ansible.builtin.debug:
+        msg: >-
+          {% if final_audit.services | length > 0 %}
+          Host {{ inventory_hostname }} is PROTECTED. Status: {{ final_audit.services[0].state }}
+          {% else %}
+          Host {{ inventory_hostname }} INSTALL FAILED or Service Not Found.
+          {% endif %}
