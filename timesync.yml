@@ -1,0 +1,14 @@
+---
+- name: Configure timezone and time sync
+  hosts: all
+  become: yes
+  tasks:
+    - name: Set timezone to Africa/Lagos
+      command: timedatectl set-timezone Africa/Lagos
+ 
+    - name: Ensure chrony service is running
+      service:
+        name: chronyd
+        state: started
+        enabled: yes
+      when: ansible_os_family == "RedHat"

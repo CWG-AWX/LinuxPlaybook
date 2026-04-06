@@ -1,0 +1,16 @@
+---
+- name: Report Exact Linux Distributions
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Print Distribution Details
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} is running {{ ansible_distribution }} {{ ansible_distribution_version }}"
+
+    - name: Summary Table
+      run_once: true
+      ansible.builtin.debug:
+        msg: |
+          {% for host in ansible_play_hosts %}
+          {{ host }}: {{ hostvars[host]['ansible_distribution'] }} {{ hostvars[host]['ansible_distribution_version'] }}
+          {% endfor %}

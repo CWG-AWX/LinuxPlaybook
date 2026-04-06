@@ -1,0 +1,53 @@
+---
+- name: Install and Configure CrowdStrike Falcon Sensor on Ubuntu
+  hosts: all
+  become: yes
+  vars:
+    # Your confirmed CID and filename
+    falcon_cid: "712BFC65A93944C0A66711B2541AC1D3-4B"
+    falcon_deb: "falcon-sensor_7.34.0-18708_amd64.deb"
+
+  tasks:
+    - name: Ensure /opt directory exists
+      ansible.builtin.file:
+        path: /opt
+        state: directory
+        mode: '0755'
+
+    - name: Copy the Falcon DEB to /opt
+      ansible.builtin.copy:
+        src: "{{ falcon_deb }}"
+        dest: "/opt/{{ falcon_deb }}"
+        mode: '0644'
+
+    - name: Install the Falcon Sensor DEB
+      ansible.builtin.apt:
+        deb: "/opt/{{ falcon_deb }}"
+        state: present
+
+    - name: Configure Falcon Sensor with CID
+      ansible.builtin.command:
+        cmd: "/opt/CrowdStrike/falconctl -s --cid={{ falcon_cid }}"
+      register: falcon_config
+      changed_when: "'Commit successful' in falcon_config.stdout"
+
+    - name: Start and Enable Falcon Sensor service
+      ansible.builtin.systemd:
+        name: falcon-sensor
+        state: started
+        enabled: yes
+
+    - name: Check Falcon Sensor status
+      ansible.builtin.command:
+        cmd: "systemctl status falcon-sensor.service"
+      register: sensor_status
+      changed_when: false
+
+    - name: Display Sensor Status
+      ansible.builtin.debug:
+        var: sensor_status.stdout_lines
+
+    - name: Cleanup - Remove the installer file from /opt
+      ansible.builtin.file:
+        path: "/opt/{{ falcon_deb }}"
+        state: absent

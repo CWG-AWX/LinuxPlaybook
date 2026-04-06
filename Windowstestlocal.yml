@@ -1,0 +1,64 @@
+---
+- name: Windows Checkmk Agent Deployment
+  hosts: all
+  gather_facts: no
+  
+  vars:
+    # --- FILE PATH CONFIG ---
+    src_patch: "/mnt/updates/check_mk_agent.msi"
+    remote_temp_dir: "C:\\Windows\\Temp"
+    remote_patch_path: "{{ remote_temp_dir }}\\check_mk_agent.msi"
+
+  tasks:
+    # ============================================================
+    # 1. PREPARATION & MOUNT VERIFICATION
+    # ============================================================
+
+    - name: Ensure patch file exists on AWX side (Mount Check)
+      delegate_to: localhost
+      ansible.builtin.stat:
+        path: "{{ src_patch }}"
+      register: local_file
+
+    - name: Fail if mount or file not visible
+      ansible.builtin.fail:
+        msg: "The path {{ src_patch }} is not visible. Check AWX 'Paths to expose to isolated jobs' setting."
+      when: not local_file.stat.exists
+
+    - name: Ensure remote temp directory exists on Windows
+      ansible.windows.win_file:
+        path: "{{ remote_temp_dir }}"
+        state: directory
+
+    # ============================================================
+    # 2. COPY & INSTALL
+    # ============================================================
+
+    - name: Copy Checkmk MSI to Windows server
+      ansible.windows.win_copy:
+        src: "{{ src_patch }}"
+        dest: "{{ remote_patch_path }}"
+
+    - name: Install Checkmk Agent MSI
+      ansible.windows.win_package:
+        path: "{{ remote_patch_path }}"
+        state: present
+        arguments: '/qn /norestart'
+      become: yes
+      become_method: runas
+      become_user: ansible_svc
+      register: install_result
+
+    # ============================================================
+    # 3. CLEANUP
+    # ============================================================
+
+    - name: Cleanup MSI file from Windows
+      ansible.windows.win_file:
+        path: "{{ remote_patch_path }}"
+        state: absent
+      ignore_errors: yes
+
+    - name: Show Installation Result
+      ansible.builtin.debug:
+        msg: "Installation was successful: {{ install_result.changed }}"

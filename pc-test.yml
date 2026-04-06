@@ -1,0 +1,35 @@
+---
+- name: Test Nutanix Prism Central Connection
+  hosts: localhost
+  gather_facts: false
+  vars:
+    pc_ip: "10.20.24.111"
+    pc_user: "michael"
+    pc_pass: "Obateru@123"
+
+  tasks:
+    - name: Task 1 - Verify Connection
+      nutanix.ncp.ntnx_clusters_info:
+        nutanix_host: "{{ pc_ip }}"
+        nutanix_username: "{{ pc_user }}"
+        nutanix_password: "{{ pc_pass }}"
+        validate_certs: false
+      register: cluster_list
+
+    - name: Task 2 - Report Results
+      debug:
+        msg: 
+          - "Connection Successful!"
+          - "Prism Central Version: {{ cluster_list.response.metadata.api_version | default('Unknown') }}"
+
+    - name: Task 3 - List Images
+      nutanix.ncp.ntnx_images_info:
+        nutanix_host: "{{ pc_ip }}"
+        nutanix_username: "{{ pc_user }}"
+        nutanix_password: "{{ pc_pass }}"
+        validate_certs: false
+      register: image_list
+
+    - name: Task 4 - Print total images
+      debug:
+        msg: "Found {{ image_list.response.metadata.total_matches }} images."

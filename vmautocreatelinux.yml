@@ -1,0 +1,170 @@
+---
+- name: Deploy RHEL 9 VM (Definitive Storage Container & LVM Fix)
+  hosts: localhost
+  gather_facts: false
+  become: false
+
+  vars:
+    # --- NUTANIX AUTH ---
+    nutanix_host: "10.20.24.111"
+    nutanix_user: "michael"
+    nutanix_pass: "Obateru@123"
+
+    # --- INFRA UUIDS ---
+    cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
+    subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f"
+    image_uuid: "5ea85426-1c3e-42a5-9b45-fb1fd91fdcbc"
+    
+    # Target Container
+    target_container: "cwg-default-container"
+
+    # --- AWX SURVEY INPUTS ---
+    netmask: "24"
+    sysprep_path: "/tmp/cloud-init-{{ vm_name }}.yaml"
+
+  tasks:
+    - name: Create cloud-init config
+      copy:
+        dest: "{{ sysprep_path }}"
+        content: |
+          #cloud-config
+          preserve_hostname: false
+          hostname: "{{ vm_name }}"
+          fqdn: "{{ vm_name }}"
+
+          users:
+            - name: Administrator
+              groups: wheel
+              shell: /bin/bash
+              sudo: ALL=(ALL) NOPASSWD:ALL
+              lock_passwd: false
+
+          chpasswd:
+            list: |
+              Administrator:cwg@2026
+            expire: false
+
+          ssh_pwauth: true
+
+          runcmd:
+            - |
+              bash -c '
+              hostnamectl set-hostname "{{ vm_name }}"
+
+              IFACE=$(nmcli -t -f DEVICE dev | grep -v "lo" | head -n 1)
+              for conn in $(nmcli -t -f NAME connection show); do nmcli connection delete "$conn"; done
+              nmcli con add type ethernet con-name static-ip ifname "$IFACE" \
+                ipv4.addresses {{ target_ip }}/{{ netmask }} \
+                ipv4.gateway {{ target_gateway }} \
+                ipv4.dns "8.8.8.8,1.1.1.1" \
+                ipv4.method manual
+              nmcli con up static-ip
+
+              rm -f /etc/lvm/devices/system.devices
+              vgscan
+              pvscan
+
+              EXTRA_DISK=$(lsblk -dn -o NAME,TYPE | grep disk | awk "{print \$1}" | grep -vE "sda|vda" | head -n 1)
+              
+              if [ -n "$EXTRA_DISK" ]; then
+                pvcreate /dev/$EXTRA_DISK
+                VG_NAME=$(vgs --noheadings -o vg_name | xargs | awk "{print \$1}")
+                if [ -n "$VG_NAME" ]; then
+                  vgextend $VG_NAME /dev/$EXTRA_DISK
+                  lvextend -l +100%FREE /dev/$VG_NAME/root
+                  xfs_growfs /
+                fi
+              fi
+
+              systemctl enable sshd --now
+              '
+
+    - name: Deploy VM to Nutanix
+      nutanix.ncp.ntnx_vms:
+        nutanix_host: "{{ nutanix_host }}"
+        nutanix_username: "{{ nutanix_user }}"
+        nutanix_password: "{{ nutanix_pass }}"
+        validate_certs: false
+        state: present
+        name: "{{ vm_name }}"
+        cluster:
+          uuid: "{{ cluster_uuid }}"
+        vcpus: "{{ vm_cpu | int }}"
+        memory_gb: "{{ vm_memory_gb | int }}"
+        networks:
+          - is_connected: true
+            subnet:
+              uuid: "{{ subnet_uuid }}"
+        disks:
+          # OS Disk: Inherits container from the Image
+          - type: DISK
+            bus: SCSI
+            clone_image:
+              uuid: "{{ image_uuid }}"
+          # Data Disk: Explicitly placed in cwg-default-container
+          - type: DISK
+            bus: SCSI
+            size_gb: "{{ extra_disk_gb | int }}"
+            storage_container:
+              name: "{{ target_container }}"
+        guest_customization:
+          type: cloud_init
+          script: "{{ lookup('file', sysprep_path) }}"
+
+    - name: Add VM to temporary inventory
+      add_host:
+        name: "{{ vm_name }}"
+        ansible_host: "{{ target_ip }}"
+        ansible_user: Administrator
+        ansible_password: "cwg@2026"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+
+    - name: Wait for Cloud-Init to finish
+      wait_for_connection:
+        delay: 60
+        timeout: 300
+      delegate_to: "{{ vm_name }}"
+
+    - name: Remove temp file
+      file:
+        path: "{{ sysprep_path }}"
+        state: absent
+
+# =========================================
+# POST CONFIG - AWX ACCESS
+# =========================================
+- name: Bootstrap Linux Node for AWX
+  hosts: "{{ vm_name }}"
+  become: yes
+
+  vars:
+    ansible_user_name: "ansible"
+    awx_pub_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBEuxy3oDAAUDqVY4pDOISchf5DDrU491kluibL64HqK awx-ansible"
+
+  tasks:
+    - name: Create ansible user
+      user:
+        name: "{{ ansible_user_name }}"
+        shell: /bin/bash
+        create_home: yes
+
+    - name: Add SSH key
+      authorized_key:
+        user: "{{ ansible_user_name }}"
+        key: "{{ awx_pub_key }}"
+
+    - name: Enable sudo
+      copy:
+        dest: "/etc/sudoers.d/{{ ansible_user_name }}"
+        content: "{{ ansible_user_name }} ALL=(ALL) NOPASSWD:ALL"
+        mode: '0440'
+        validate: '/usr/sbin/visudo -cf %s'
+
+    - name: Verify Final Disk Expansion
+      command: df -h /
+      register: final_disk
+      changed_when: false
+
+    - name: Final Status
+      debug:
+        msg: "VM {{ inventory_hostname }} is up. Root size: {{ final_disk.stdout_lines[1].split()[1] }}"

@@ -1,0 +1,127 @@
+---
+- name: Standalone Nutanix Snapshot and Restore Test
+  hosts: all
+  gather_facts: no
+  
+  vars:
+    nutanix_host: "10.20.24.5" 
+    nutanix_user: "michael" 
+    nutanix_pass: "Oba@2024"
+    snap_name: "ManualTest_{{ inventory_hostname | replace('.', '_') }}_{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}"
+
+  tasks:
+    - name: Retrieve VM UUID
+      uri:
+        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/?filter=vm_name%3D%3D{{ inventory_hostname }}"
+        method: GET
+        user: "{{ nutanix_user }}"
+        password: "{{ nutanix_pass }}"
+        force_basic_auth: yes
+        validate_certs: false
+        headers:
+          Accept: "application/json"
+      delegate_to: localhost
+      register: vm_search
+
+    - name: Set VM UUID Fact
+      set_fact:
+        ntnx_uuid: "{{ vm_search.json.entities[0].uuid }}"
+
+    - name: "STEP 1: Create Snapshot (v2 API)"
+      uri:
+        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/snapshots"
+        method: POST
+        user: "{{ nutanix_user }}"
+        password: "{{ nutanix_pass }}"
+        force_basic_auth: yes
+        validate_certs: false
+        headers:
+          Accept: "application/json"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          snapshot_specs: [{ "vm_uuid": "{{ ntnx_uuid }}", "snapshot_name": "{{ snap_name }}" }]
+        status_code: [200, 201, 202]
+      delegate_to: localhost
+      register: v2_snap_info
+
+    - name: "POLL: Wait for Snapshot Task and Get Task Info"
+      uri:
+        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/tasks/{{ v2_snap_info.json.task_uuid }}"
+        method: GET
+        user: "{{ nutanix_user }}"
+        password: "{{ nutanix_pass }}"
+        force_basic_auth: yes
+        validate_certs: false
+        headers:
+          Accept: "application/json"
+      delegate_to: localhost
+      register: snap_task_status
+      until: snap_task_status.json.progress_status == 'Succeeded'
+      retries: 20
+      delay: 15
+
+    - name: "EXTRACT: Get Actual Snapshot UUID"
+      set_fact:
+        snapshot_uuid: "{{ item.entity_id }}"
+      loop: "{{ snap_task_status.json.entity_list }}"
+      when: "'snapshot' in item.entity_type | lower"
+
+    - name: "STEP 2: Power OFF VM"
+      uri:
+        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/{{ ntnx_uuid }}/set_power_state"
+        method: POST
+        user: "{{ nutanix_user }}"
+        password: "{{ nutanix_pass }}"
+        force_basic_auth: yes
+        validate_certs: false
+        headers:
+          Accept: "application/json"
+          Content-Type: "application/json"
+        body_format: json
+        body: { "transition": "OFF" }
+        status_code: [200, 201, 202]
+      delegate_to: localhost
+
+    - name: Wait for Power Off
+      pause: seconds=30
+
+    - name: "STEP 3: Restore Snapshot (Revert via v3 API)"
+      uri:
+        url: "https://{{ nutanix_host }}:9440/api/nutanix/v3/vms/{{ ntnx_uuid }}/revert"
+        method: POST
+        user: "{{ nutanix_user }}"
+        password: "{{ nutanix_pass }}"
+        force_basic_auth: yes
+        validate_certs: false
+        headers:
+          Accept: "application/json"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          vm_recovery_point_uuid: "{{ snapshot_uuid }}"
+        status_code: [200, 201, 202]
+      delegate_to: localhost
+
+    - name: Wait for Restore
+      pause: minutes=1
+
+    - name: "STEP 4: Power ON VM"
+      uri:
+        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/{{ ntnx_uuid }}/set_power_state"
+        method: POST
+        user: "{{ nutanix_user }}"
+        password: "{{ nutanix_pass }}"
+        force_basic_auth: yes
+        validate_certs: false
+        headers:
+          Accept: "application/json"
+          Content-Type: "application/json"
+        body_format: json
+        body: { "transition": "ON" }
+        status_code: [200, 201, 202]
+      delegate_to: localhost
+      
+    - name: Confirm Final Step
+      debug:
+        msg: "Cycle complete. VM {{ inventory_hostname }} restored from snapshot {{ snapshot_uuid }} and is powering up."

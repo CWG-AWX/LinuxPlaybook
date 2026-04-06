@@ -1,0 +1,42 @@
+---
+- name: Open Checkmk Port 6556
+  hosts: all
+  become: yes
+  tasks:
+    - name: Check if UFW is installed
+      command: which ufw
+      register: ufw_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Open port 6556 in UFW
+      ufw:
+        rule: allow
+        port: '6556'
+        proto: tcp
+      when: ufw_check.rc == 0
+
+    - name: Open port 6556 in IPTables (Standard/Fall-through)
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: '6556'
+        jump: ACCEPT
+        comment: "Allow Checkmk Agent"
+      when: ufw_check.rc != 0
+
+    - name: Ensure IPTables rules persist (RedHat/CentOS)
+      shell: service iptables save
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+
+    - name: Verify port is listening locally
+      shell: "netstat -tuln | grep :6556"
+      register: port_status
+      failed_when: false
+      changed_when: false
+
+    - name: Report Port Status
+      debug:
+        msg: "Port 6556 is confirmed listening!"
+      when: "':6556' in port_status.stdout"

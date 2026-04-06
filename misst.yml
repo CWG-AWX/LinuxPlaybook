@@ -1,0 +1,70 @@
+---
+- name: Migrate Checkmk Password Expiry Monitoring
+  hosts: all
+  become: yes
+  vars:
+    warning_days: 7
+    critical_days: 0
+    plugin_old_path: "/usr/lib/check_mk_agent/plugins/mk-passwd"
+    local_check_path: "/usr/lib/check_mk_agent/local/check_password_expiry.sh"
+
+  tasks:
+    - name: 1. Remove the old ghost plugin (Move to backup)
+      ansible.builtin.shell: |
+        mv {{ plugin_old_path }} /tmp/mk-passwd_$(date +%F).bak
+      args:
+        removes: "{{ plugin_old_path }}"
+      register: move_plugin
+      changed_when: move_plugin.rc == 0
+
+    - name: 2. Create the new local check script
+      ansible.builtin.copy:
+        dest: "{{ local_check_path }}"
+        mode: '0755'
+        owner: root
+        group: root
+        content: |
+          #!/bin/bash
+          # Local check for all users' password expiry (Checkmk)
+
+          WARNING_DAYS={{ warning_days }}
+          CRITICAL_DAYS={{ critical_days }}
+
+          # Loop through users with UID >= 1000
+          for user in $(getent passwd {1000..60000} | cut -d: -f1); do
+              
+              # Get expiry date string
+              expire_date=$(chage -l "$user" | grep "Password expires" | awk -F": " '{print $2}')
+              
+              # Skip if password never expires
+              if [[ "$expire_date" == "never" ]] || [[ -z "$expire_date" ]]; then
+                  echo "0 PasswordExpiry_$user - OK: Password for $user never expires"
+                  continue
+              fi
+              
+              # Convert dates to seconds
+              expire_seconds=$(date -d "$expire_date" +%s 2>/dev/null)
+              if [ $? -ne 0 ]; then continue; fi
+              
+              now_seconds=$(date +%s)
+              days_left=$(( (expire_seconds - now_seconds) / 86400 ))
+
+              # Determine state (0=OK, 1=WARN, 2=CRIT)
+              if [ "$days_left" -le "$CRITICAL_DAYS" ]; then
+                  state=2
+                  status_text="CRITICAL"
+              elif [ "$days_left" -le "$WARNING_DAYS" ]; then
+                  state=1
+                  status_text="WARNING"
+              else
+                  state=0
+                  status_text="OK"
+              fi
+
+              # Output line for Checkmk
+              echo "$state PasswordExpiry_$user days_left=$days_left $status_text: Password for $user expires in $days_left days"
+          done
+
+    - name: 3. Final verification message
+      ansible.builtin.debug:
+        msg: "SUCCESS: New script installed. Remember to 'Remove vanished services' in the Checkmk UI."

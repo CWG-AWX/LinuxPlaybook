@@ -1,0 +1,43 @@
+---
+- name: Install Checkmk Agent from Mounted Storage
+  hosts: all
+  gather_facts: no
+  vars:
+    # --- UPDATED PATH CONFIG ---
+    # Using the mount point path as seen in your Windows Update configuration
+    src_patch: "/mnt/updates/check_mk_agent.msi"
+    remote_temp_dir: "C:\\Windows\\Temp"
+    remote_patch_path: "{{ remote_temp_dir }}\\check_mk_agent.msi"
+    
+  # Escalation settings for Admin installation
+  become: yes
+  become_method: runas
+  become_user: ansible_svc
+
+  tasks:
+    - name: Ensure temp directory exists on Windows
+      ansible.windows.win_file:
+        path: "{{ remote_temp_dir }}"
+        state: directory
+
+    - name: Copy Checkmk MSI from Controller Mount to Windows Server
+      ansible.windows.win_copy:
+        src: "{{ src_patch }}"
+        dest: "{{ remote_patch_path }}"
+      register: copy_status
+
+    - name: Install Checkmk Agent via MSI
+      ansible.windows.win_package:
+        path: "{{ remote_patch_path }}"
+        state: present
+        arguments: '/qn /norestart'
+      register: install_result
+
+    - name: Verify Installation Status
+      ansible.builtin.debug:
+        var: install_result
+
+    - name: Cleanup Installation File
+      ansible.windows.win_file:
+        path: "{{ remote_patch_path }}"
+        state: absent

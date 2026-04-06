@@ -1,0 +1,80 @@
+---
+- name: Install CrowdStrike Falcon - Multi-OS (RHEL & Ubuntu)
+  hosts: all
+  become: yes
+  
+  vars:
+    falcon_cid: "712BFC65A93944C0A66711B2541AC1D3-4B"
+    
+    # Mapping filenames to specific OS versions
+    falcon_pkg_map:
+      RedHat:
+        "8": "falcon-sensor-7.34.0-18708.el8.x86_64.rpm"
+        "9": "falcon-sensor-7.34.0-18708.el9.x86_64.rpm"
+      Debian:
+        "Ubuntu": "falcon-sensor_7.34.0-18708_amd64.deb"
+
+  tasks:
+    - name: Determine correct package to use
+      ansible.builtin.set_fact:
+        target_pkg: >-
+          {{ 
+            falcon_pkg_map['RedHat'][ansible_distribution_major_version] 
+            if ansible_os_family == 'RedHat' 
+            else falcon_pkg_map['Debian']['Ubuntu'] 
+          }}
+
+    - name: Ensure /opt directory exists
+      ansible.builtin.file:
+        path: /opt
+        state: directory
+        mode: '0755'
+
+    - name: Copy the Falcon package to the server
+      ansible.builtin.copy:
+        src: "{{ target_pkg }}"
+        dest: "/opt/{{ target_pkg }}"
+        mode: '0644'
+
+    # --- INSTALLATION BLOCK ---
+    
+    - name: Install Falcon Sensor on RHEL (Offline)
+      ansible.builtin.dnf:
+        name: "/opt/{{ target_pkg }}"
+        state: present
+        disable_gpg_check: yes
+        disablerepo: "*"
+      when: ansible_os_family == "RedHat"
+
+    - name: Install Falcon Sensor on Ubuntu (Offline)
+      ansible.builtin.apt:
+        deb: "/opt/{{ target_pkg }}"
+        state: present
+      when: ansible_os_family == "Debian"
+
+    # --- CONFIGURATION & START ---
+
+    - name: Configure Falcon CID
+      ansible.builtin.command:
+        cmd: "/opt/CrowdStrike/falconctl -s --cid={{ falcon_cid }}"
+      register: falcon_config
+      changed_when: "'Commit successful' in falcon_config.stdout"
+      failed_when: 
+        - falcon_config.rc != 0
+        - "'already set' not in falcon_config.stderr"
+
+    - name: Start and Enable Falcon Sensor
+      ansible.builtin.systemd:
+        name: falcon-sensor
+        state: started
+        enabled: yes
+
+    - name: Verify Agent is Active
+      ansible.builtin.command:
+        cmd: "systemctl is-active falcon-sensor.service"
+      register: sensor_status
+      changed_when: false
+
+    - name: Final Status
+      ansible.builtin.debug:
+        msg: "Falcon is {{ sensor_status.stdout }} on {{ inventory_hostname }} ({{ ansible_distribution }} {{ ansible_distribution_version }})"

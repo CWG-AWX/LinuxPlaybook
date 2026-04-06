@@ -1,0 +1,19 @@
+---
+- name: Linux Server Version Audit
+  hosts: all
+  gather_facts: yes
+
+  tasks:
+
+    - name: Get exact Linux version info
+      shell: |
+        echo "Hostname: $(hostname)"
+        echo "Kernel Version: $(uname -r)"
+        echo "Architecture: $(uname -m)"
+        echo "OS Release:"
+        cat /etc/os-release
+      register: linux_version
+
+    - name: Display Version Information
+      debug:
+        var: linux_version.stdout_lines

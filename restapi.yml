@@ -1,0 +1,80 @@
+---
+- name: Nutanix VM Power Cycle via Direct API
+  hosts: all
+  gather_facts: no
+  
+  vars:
+    # --- NUTANIX CONFIG ---
+    nutanix_host: "10.20.24.5" 
+    nutanix_user: "michael" 
+    nutanix_pass: "Oba@2024"
+
+  tasks:
+    # 1. Get the VM UUID first to ensure we have the correct target
+    - name: Retrieve VM UUID for {{ inventory_hostname }}
+      uri:
+        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/?filter=vm_name%3D%3D{{ inventory_hostname }}"
+        method: GET
+        user: "{{ nutanix_user }}"
+        password: "{{ nutanix_pass }}"
+        force_basic_auth: yes
+        validate_certs: false
+        headers:
+          Accept: "application/json"
+      delegate_to: localhost
+      register: vm_search
+
+    - name: Set UUID Fact
+      set_fact:
+        ntnx_uuid: "{{ vm_search.json.entities[0].uuid }}"
+
+    # 2. Power Off the VM
+    - name: "API CALL: Power OFF VM"
+      uri:
+        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/{{ ntnx_uuid }}/set_power_state"
+        method: POST
+        user: "{{ nutanix_user }}"
+        password: "{{ nutanix_pass }}"
+        force_basic_auth: yes
+        validate_certs: false
+        headers:
+          Accept: "application/json"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          transition: "OFF"
+        status_code: [200, 201, 202] # THIS IS THE FIX
+      delegate_to: localhost
+      register: power_off_res
+
+    - name: "DEBUG: Power Off Status"
+      debug:
+        msg: "Power off task initiated. Task UUID: {{ power_off_res.json.task_uuid | default('N/A') }}"
+
+    # 3. The Wait
+    - name: Wait for 2 minutes before powering back on
+      pause:
+        minutes: 2
+
+    # 4. Power On the VM
+    - name: "API CALL: Power ON VM"
+      uri:
+        url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/{{ ntnx_uuid }}/set_power_state"
+        method: POST
+        user: "{{ nutanix_user }}"
+        password: "{{ nutanix_pass }}"
+        force_basic_auth: yes
+        validate_certs: false
+        headers:
+          Accept: "application/json"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          transition: "ON"
+        status_code: [200, 201, 202] # THIS IS THE FIX
+      delegate_to: localhost
+      register: power_on_res
+
+    - name: "Final Confirmation"
+      debug:
+        msg: "Power on task for {{ inventory_hostname }} has been sent successfully."

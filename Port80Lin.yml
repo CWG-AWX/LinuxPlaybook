@@ -1,0 +1,20 @@
+---
+- name: Identify services running on Port 80
+  hosts: all
+  become: yes
+  tasks:
+    - name: Get process using port 80
+      # -l (listen), -t (tcp), -p (process), -n (numeric)
+      shell: "ss -ltpn | grep ':80 ' | awk '{print $6}'"
+      register: port_80_process
+      changed_when: false
+      failed_when: false
+
+    - name: Report running services
+      debug:
+        msg: >
+          {% if port_80_process.stdout %}
+          Service found on {{ inventory_hostname }}: {{ port_80_process.stdout }}
+          {% else %}
+          No service detected on port 80 for {{ inventory_hostname }}.
+          {% endif %}

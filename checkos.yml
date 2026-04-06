@@ -1,0 +1,18 @@
+---
+- name: Windows Server Version Audit
+  hosts: all
+  gather_facts: yes
+
+  tasks:
+
+    - name: Get exact Windows version info
+      win_shell: |
+        $os = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+        Write-Output "Product Name: $($os.ProductName)"
+        Write-Output "Current Build: $($os.CurrentBuild)"
+        Write-Output "UBR: $($os.UBR)"
+      register: win_version
+
+    - name: Display Version Information
+      debug:
+        var: win_version.stdout_lines

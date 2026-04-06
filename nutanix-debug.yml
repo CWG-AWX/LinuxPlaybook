@@ -1,0 +1,19 @@
+---
+- hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Get complete list of Nutanix modules
+      shell: "ansible-doc -l | grep nutanix.ncp"
+      register: full_module_list
+
+    - name: Display all Nutanix modules found
+      debug:
+        msg: "{{ full_module_list.stdout_lines }}"
+
+    - name: Specifically search for VM or Snapshot modules
+      shell: "ansible-doc -l | grep -E 'nutanix.ncp.ntnx_vm|snap|recovery'"
+      register: specific_modules
+
+    - debug:
+        var: specific_modules.stdout_lines

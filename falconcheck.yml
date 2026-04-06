@@ -1,0 +1,30 @@
+---
+- name: Check CrowdStrike Falcon Agent Status
+  hosts: all
+  gather_facts: true
+  tasks:
+    # --- LINUX STATUS CHECK ---
+    - name: Get Falcon status (Linux)
+      ansible.builtin.systemd:
+        name: falcon-sensor
+      register: linux_falcon_status
+      when: ansible_os_family != "Windows"
+
+    # --- WINDOWS STATUS CHECK ---
+    - name: Get Falcon status (Windows)
+      ansible.windows.win_service:
+        name: csagent
+      register: win_falcon_status
+      when: ansible_os_family == "Windows"
+
+    # --- REPORTING ---
+    - name: Display Agent Status
+      ansible.builtin.debug:
+        msg: |
+          {% if ansible_os_family == "Windows" %}
+          Host: {{ inventory_hostname }} (Windows)
+          Status: {{ win_falcon_status.state | default('NOT INSTALLED') }}
+          {% else %}
+          Host: {{ inventory_hostname }} ({{ ansible_distribution }})
+          Status: {{ linux_falcon_status.status.ActiveState | default('NOT INSTALLED') }}
+          {% endif %}

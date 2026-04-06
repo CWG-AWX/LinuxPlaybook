@@ -1,0 +1,17 @@
+---
+- name: Report Primary IP Addresses
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Display Primary IPv4 Address
+      debug:
+        msg: "Host: {{ inventory_hostname }} | Primary IP: {{ ansible_default_ipv4.address | default('No Default IP Found') }}"
+
+    - name: Summary Table (Optional)
+      run_once: true
+      debug:
+        msg: |
+          {% for host in ansible_play_hosts %}
+          {{ host }}: {{ hostvars[host]['ansible_default_ipv4']['address'] | default('N/A') }}
+          {% endfor %}
+      ignore_errors: yes

@@ -1,0 +1,41 @@
+---
+- name: Bootstrap Linux Nodes for AWX
+  hosts: all
+  become: yes
+  vars:
+    ansible_user_name: "ansible"
+    awx_pub_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBEuxy3oDAAUDqVY4pDOISchf5DDrU491kluibL64HqK awx-ansible"
+
+  tasks:
+    - name: Create the ansible service account
+      user:
+        name: "{{ ansible_user_name }}"
+        shell: /bin/bash
+        state: present
+        create_home: yes
+
+    - name: Set up authorized_keys for the ansible user
+      authorized_key:
+        user: "{{ ansible_user_name }}"
+        state: present
+        key: "{{ awx_pub_key }}"
+
+    - name: Configure passwordless sudo for the ansible user
+      copy:
+        content: "{{ ansible_user_name }} ALL=(ALL) NOPASSWD:ALL"
+        dest: "/etc/sudoers.d/{{ ansible_user_name }}"
+        mode: '0440'
+        validate: '/usr/sbin/visudo -cf %s'
+
+    - name: Ensure PubkeyAuthentication is enabled in sshd_config
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PubkeyAuthentication'
+        line: 'PubkeyAuthentication yes'
+      notify: Restart SSH
+
+  handlers:
+    - name: Restart SSH
+      service:
+        name: ssh
+        state: restarted
