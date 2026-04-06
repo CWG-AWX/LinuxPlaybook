@@ -1,20 +1,23 @@
 ---
-- name: Report Windows Primary IP Addresses
+- name: Report Windows Primary IPv4 Addresses
   hosts: all
   gather_facts: true
   tasks:
+    - name: Filter for Primary IPv4 Address
+      ansible.builtin.set_fact:
+        # This regex looks for standard IPv4 patterns (x.x.x.x) and ignores IPv6
+        primary_ipv4: "{{ ansible_ip_addresses | select('match', '^[0-9]+\\.') | first | default('No IPv4 Found') }}"
+
     - name: Display Primary IPv4 Address
       ansible.builtin.debug:
-        msg: "Host: {{ inventory_hostname }} | Primary IP: {{ ansible_ip_addresses[0] | default('No IP Found') }}"
+        msg: "Host: {{ inventory_hostname }} | IPv4: {{ primary_ipv4 }}"
 
     - name: Summary Table
       run_once: true
       ansible.builtin.debug:
         msg: |
           {% for host in ansible_play_hosts %}
-          {{ host | pad_to_length(20) }}: {{ hostvars[host]['ansible_ip_addresses'][0] | default('N/A') }}
+          {{ host | pad_to_length(25) }}: {{ hostvars[host]['primary_ipv4'] }}
           {% endfor %}
       vars:
-        # This helps align the text in the AWX/Console output
-        pad_to_length: "{{ (host | string).ljust(20) }}"
-      ignore_errors: yes
+        pad_to_length: "{{ (host | string).ljust(25) }}"
