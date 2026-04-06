@@ -1,0 +1,47 @@
+---
+- name: Install CrowdStrike Falcon on Windows - Repo Copy Version
+  hosts: all
+  gather_facts: false 
+  
+  vars:
+    # Your CrowdStrike Customer ID
+    falcon_cid: "712BFC65A93944C0A66711B2541AC1D3-4B"
+    
+    # Filename from your GitHub repo screenshot
+    falcon_exe: "FalconSensor_Windows.exe"
+    
+    # Local path on the Windows server to stage the file
+    dest_path: 'C:\temp'
+
+  tasks:
+    - name: Ensure C:\temp directory exists
+      ansible.windows.win_file:
+        path: "{{ dest_path }}"
+        state: directory
+
+    - name: Copy Falcon EXE from repository to server
+      ansible.windows.win_copy:
+        src: "{{ falcon_exe }}"
+        dest: "{{ dest_path }}\\{{ falcon_exe }}"
+      register: copy_result
+
+    - name: Install Falcon Sensor (QUIET MODE - NO GUI)
+      ansible.windows.win_package:
+        path: "{{ dest_path }}\\{{ falcon_exe }}"
+        # /quiet and /install ensure no popups appear
+        arguments: '/install /quiet /norestart CID={{ falcon_cid }}'
+        state: present
+        # Prevents re-installation if the driver is already present
+        creates_path: 'C:\Windows\System32\drivers\crowdstrike\csagent.sys'
+      register: install_result
+
+    - name: Ensure CrowdStrike Service (csagent) is active
+      ansible.windows.win_service:
+        name: csagent
+        state: started
+        start_mode: auto
+      register: cs_service
+
+    - name: Final Status
+      ansible.builtin.debug:
+        msg: "Falcon Windows Agent is {{ cs_service.state }} on {{ inventory_hostname }}"
