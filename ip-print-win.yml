@@ -1,20 +1,21 @@
 ---
-- name: Report Windows Primary IP Addresses
+- name: Report Primary IP Addresses (Windows - Fast & Clean)
   hosts: all
-  gather_facts: true
+  gather_facts: false
+  become: false
+
   tasks:
     - name: Display Primary IPv4 Address
-      ansible.builtin.debug:
-        msg: "Host: {{ inventory_hostname }} | Primary IP: {{ ansible_ip_addresses[0] | default('No IP Found') }}"
+      debug:
+        msg: >
+          Host: {{ inventory_hostname }} |
+          Primary IP: {{ ansible_host | default('No IP Found') }}
 
     - name: Summary Table
       run_once: true
-      ansible.builtin.debug:
+      debug:
         msg: |
+          ================== SERVER IP SUMMARY ==================
           {% for host in ansible_play_hosts %}
-          {{ host | pad_to_length(20) }}: {{ hostvars[host]['ansible_ip_addresses'][0] | default('N/A') }}
+          {{ "%-25s" | format(host) }} : {{ hostvars[host]['ansible_host'] | default('N/A') }}
           {% endfor %}
-      vars:
-        # This helps align the text in the AWX/Console output
-        pad_to_length: "{{ (host | string).ljust(20) }}"
-      ignore_errors: yes
