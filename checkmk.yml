@@ -1,56 +1,112 @@
 ---
-- name: Offline Install Checkmk Agent - Ubuntu and Rhel
+- name: Deploy Checkmk Agent and Local Password Check
   hosts: all
   become: yes
+  
   vars:
-    agent_filename: "check-mk-agent_2.4.0p20-1_all.deb"
-    check-mk-agent-2.4.0p20-1.noarch.rpm
+    # Filenames from your repository screenshot
+    agent_deb: "check-mk-agent_2.4.0p20-1_all.deb"
+    agent_rpm: "check-mk-agent-2.4.0p20-1.noarch.rpm"
+    script_dest: "/usr/lib/check_mk_agent/local/check_password_expiry.sh"
 
   tasks:
-    - name: Copy Checkmk agent to the server
-      copy:
-        src: "{{ agent_filename }}"
-        dest: "/tmp/{{ agent_filename }}"
-        mode: '0644'
+    # --- 1. PRE-CHECK ---
+    - name: Gather Service Facts
+      ansible.builtin.service_facts:
 
-    - name: Install package (Offline Mode)
-      apt:
-        deb: "/tmp/{{ agent_filename }}"
-        state: present
-        update_cache: no
+    - name: Check if Checkmk is already active
+      ansible.builtin.set_fact:
+        checkmk_active: "{{ ansible_facts.services['check-mk-agent.socket']['state'] == 'running' if 'check-mk-agent.socket' in ansible_facts.services else false }}"
 
-    - name: Verify installation status
-      command: dpkg-query -W -f='${Status}' check-mk-agent
-      register: pkg_check
-      failed_when: "'install ok installed' not in pkg_check.stdout"
-      changed_when: false
+    # --- 2. INSTALLATION BLOCK (SKIPPED IF RUNNING) ---
+    - name: Install Checkmk Agent
+      block:
+        - name: Set Package Name for OS
+          ansible.builtin.set_fact:
+            agent_pkg: "{{ agent_rpm if ansible_os_family == 'RedHat' else agent_deb }}"
 
-    #- name: Install package (Offline Mode)
-      #dnf:
-        #name: "/tmp/{{ agent_filename }}"
-        #state: present
-        #disable_gpg_check: yes
+        - name: Copy Agent Package
+          ansible.builtin.copy:
+            src: "{{ agent_pkg }}"
+            dest: "/tmp/{{ agent_pkg }}"
+            mode: '0644'
 
-    #- name: Verify installation status
-      #command: rpm -q check-mk-agent
-      #register: pkg_check
-      #failed_when: pkg_check.rc != 0
-      #changed_when: false 
+        - name: Install RPM (RHEL)
+          ansible.builtin.dnf:
+            name: "/tmp/{{ agent_pkg }}"
+            state: present
+            disable_gpg_check: yes
+          when: ansible_os_family == "RedHat"
 
-    - name: Ensure Checkmk socket is enabled
-      systemd:
+        - name: Install DEB (Ubuntu)
+          ansible.builtin.apt:
+            deb: "/tmp/{{ agent_pkg }}"
+            state: present
+          when: ansible_os_family == "Debian"
+
+        - name: Cleanup Temporary Package
+          ansible.builtin.file:
+            path: "/tmp/{{ agent_pkg }}"
+            state: absent
+
+      when: not checkmk_active
+
+    # --- 3. SERVICE & FIREWALL (ENSURE STATE) ---
+    - name: Ensure Checkmk Socket is enabled and started
+      ansible.builtin.systemd:
         name: check-mk-agent.socket
         enabled: yes
         state: started
+
+    - name: Open Firewall Port 6556 (UFW - Ubuntu)
+      community.general.ufw:
+        rule: allow
+        port: '6556'
+        proto: tcp
+      when: ansible_os_family == "Debian"
       ignore_errors: yes
 
-    - name: Cleanup temporary file
-      file:
-        path: "/tmp/{{ agent_filename }}"
-        state: absent
+    - name: Open Firewall Port 6556 (Firewalld - RHEL)
+      ansible.posix.firewalld:
+        port: 6556/tcp
+        permanent: yes
+        state: enabled
+        immediate: yes
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
 
-    - name: Final Check - Run agent locally
-      command: check_mk_agent
-      register: agent_run
-      failed_when: agent_run.stdout == ""
-      changed_when: false
+    # --- 4. SCRIPT DEPLOYMENT (RUNS ON ALL SERVERS) ---
+    - name: Create local check directory if missing
+      ansible.builtin.file:
+        path: "/usr/lib/check_mk_agent/local"
+        state: directory
+        mode: '0755'
+
+    - name: Deploy Password Expiry Script
+      ansible.builtin.copy:
+        dest: "{{ script_dest }}"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Checkmk Local Check: User Password Expiration
+          WARNING_DAYS=7
+          CRITICAL_DAYS=0
+          for user in $(getent passwd {1000..60000} | cut -d: -f1); do
+              expire_date=$(chage -l "$user" | grep "Password expires" | awk -F": " '{print $2}')
+              if [[ "$expire_date" == "never" ]] || [[ -z "$expire_date" ]]; then
+                  echo "0 PasswordExpiry_$user - OK: Password for $user never expires"
+                  continue
+              fi
+              expire_seconds=$(date -d "$expire_date" +%s 2>/dev/null)
+              if [ $? -ne 0 ]; then continue; fi
+              now_seconds=$(date +%s)
+              days_left=$(( (expire_seconds - now_seconds) / 86400 ))
+              if [ "$days_left" -le "$CRITICAL_DAYS" ]; then
+                  state=2; status_text="CRITICAL"
+              elif [ "$days_left" -le "$WARNING_DAYS" ]; then
+                  state=1; status_text="WARNING"
+              else
+                  state=0; status_text="OK"
+              fi
+              echo "$state PasswordExpiry_$user days_left=$days_left $status_text: Password for $user expires in $days_left days"
+          done
