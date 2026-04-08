@@ -2,7 +2,7 @@
 - name: Deploy Checkmk Agent and Local Password Check
   hosts: all
   become: yes
-  gather_facts: yes  # Required to get the IP addresses
+  gather_facts: yes  # Required for IP and OS detection
   
   vars:
     agent_deb: "check-mk-agent_2.4.0p20-1_all.deb"
@@ -18,20 +18,20 @@
       ansible.builtin.set_fact:
         checkmk_active: "{{ ansible_facts.services['check-mk-agent.socket']['state'] == 'running' if 'check-mk-agent.socket' in ansible_facts.services else false }}"
 
-    # --- 2. INSTALLATION BLOCK (SKIPPED IF RUNNING) ---
+    # --- 2. INSTALLATION BLOCK (SKIPS IF ALREADY RUNNING) ---
     - name: Install Checkmk Agent
       block:
         - name: Set Package Name for OS
           ansible.builtin.set_fact:
             agent_pkg: "{{ agent_rpm if ansible_os_family == 'RedHat' else agent_deb }}"
 
-        - name: Copy Agent Package
+        - name: Copy Agent Package to /tmp
           ansible.builtin.copy:
             src: "{{ agent_pkg }}"
             dest: "/tmp/{{ agent_pkg }}"
             mode: '0644'
 
-        - name: Install RPM (RHEL)
+        - name: Install RPM (RHEL 8/9)
           ansible.builtin.dnf:
             name: "/tmp/{{ agent_pkg }}"
             state: present
@@ -57,28 +57,65 @@
         enabled: yes
         state: started
 
-    - name: Open Firewall Port 6556
-      ansible.builtin.include_tasks: 
-        # Logic to handle firewalld (RHEL) or ufw (Ubuntu)
+    - name: Open Firewall Port 6556 (Ubuntu UFW)
+      community.general.ufw:
+        rule: allow
+        port: '6556'
+        proto: tcp
+      when: ansible_os_family == "Debian"
       ignore_errors: yes
 
-    # --- 4. SCRIPT DEPLOYMENT ---
+    - name: Open Firewall Port 6556 (RHEL Firewalld)
+      ansible.posix.firewalld:
+        port: 6556/tcp
+        permanent: yes
+        state: enabled
+        immediate: yes
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+
+    # --- 4. SCRIPT DEPLOYMENT (RUNS ON ALL HOSTS) ---
+    - name: Ensure local check directory exists
+      ansible.builtin.file:
+        path: "/usr/lib/check_mk_agent/local"
+        state: directory
+        mode: '0755'
+
     - name: Deploy Password Expiry Script
       ansible.builtin.copy:
         dest: "{{ script_dest }}"
         mode: '0755'
         content: |
           #!/bin/bash
-          # (Script content here...)
-          echo "Checkmk local script deployed."
+          WARNING_DAYS=7
+          CRITICAL_DAYS=0
+          for user in $(getent passwd {1000..60000} | cut -d: -f1); do
+              expire_date=$(chage -l "$user" | grep "Password expires" | awk -F": " '{print $2}')
+              if [[ "$expire_date" == "never" ]] || [[ -z "$expire_date" ]]; then
+                  echo "0 PasswordExpiry_$user - OK: Password for $user never expires"
+                  continue
+              fi
+              expire_seconds=$(date -d "$expire_date" +%s 2>/dev/null)
+              if [ $? -ne 0 ]; then continue; fi
+              now_seconds=$(date +%s)
+              days_left=$(( (expire_seconds - now_seconds) / 86400 ))
+              if [ "$days_left" -le "$CRITICAL_DAYS" ]; then
+                  state=2; status_text="CRITICAL"
+              elif [ "$days_left" -le "$WARNING_DAYS" ]; then
+                  state=1; status_text="WARNING"
+              else
+                  state=0; status_text="OK"
+              fi
+              echo "$state PasswordExpiry_$user days_left=$days_left $status_text: Password for $user expires in $days_left days"
+          done
 
-    # --- 5. SUCCESS REPORTING JOB ---
-    - name: Print Deployment Confirmation
+    # --- 5. SUCCESS REPORTING ---
+    - name: Final Success Report
       ansible.builtin.debug:
         msg: 
           - "------------------------------------------------"
-          - "DEPLOYMENT SUCCESSFUL"
-          - "Hostname: {{ inventory_hostname }}"
-          - "IP Address: {{ ansible_default_ipv4.address }}"
-          - "OS: {{ ansible_distribution }} {{ ansible_distribution_major_version }}"
+          - "STATUS: DEPLOYMENT SUCCESSFUL"
+          - "HOSTNAME: {{ inventory_hostname }}"
+          - "IP ADDRESS: {{ ansible_default_ipv4.address | default(ansible_all_ipv4_addresses[0]) }}"
+          - "OS FAMILY: {{ ansible_os_family }}"
           - "------------------------------------------------"
