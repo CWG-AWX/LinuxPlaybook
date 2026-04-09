@@ -2,19 +2,23 @@
 - name: Create Administrative User with Home Directory
   hosts: all
   become: yes
+  vars:
+    # Dynamically set the admin group based on the OS family
+    admin_group: "{{ 'sudo' if ansible_os_family == 'Debian' else 'wheel' }}"
+
   tasks:
-    - name: Create user MohanedMohamed with sudo access and home folder
+    - name: Create user MohanedMohamed with administrative access
       ansible.builtin.user:
         name: MohanedMohamed
-        # Hashes the plain-text password for Linux compatibility
         password: "{{ 'PASSWORD: !T$ec&@19*0?1' | password_hash('sha512') }}"
         shell: /bin/bash
-        groups: sudo  # Change to 'wheel' if on RHEL/CentOS/Nutanix
+        groups: "{{ admin_group }}"
         append: yes
         state: present
-        create_home: yes  # This explicitly creates /home/MohanedMohamed
+        create_home: yes
         home: /home/MohanedMohamed
- 
+      ignore_errors: yes
+
     - name: Set correct permissions on the home directory
       ansible.builtin.file:
         path: /home/MohanedMohamed
@@ -22,3 +26,4 @@
         group: MohanedMohamed
         mode: '0755'
         state: directory
+      ignore_errors: yes
