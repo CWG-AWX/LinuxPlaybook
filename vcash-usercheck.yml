@@ -1,0 +1,37 @@
+---
+- name: Verify User Presence and Administrative Groups
+  hosts: all
+  become: yes
+  tasks:
+    - name: Check if user MohanedMohamed exists
+      ansible.builtin.getent:
+        database: passwd
+        key: MohanedMohamed
+        fail_key: false
+      register: user_check
+
+    - name: Print user presence status
+      ansible.builtin.debug:
+        msg: "Username: MohanedMohamed | Present: {{ 'Yes' if 'MohanedMohamed' in getent_passwd else 'No' }}"
+
+    - name: Check group membership (if user exists)
+      ansible.builtin.command: "id -Gn MohanedMohamed"
+      register: user_groups
+      changed_when: false
+      failed_when: false
+      when: "'MohanedMohamed' in getent_passwd"
+
+    - name: Identify administrative group membership
+      ansible.builtin.set_fact:
+        admin_status: >-
+          {% if user_groups is skipped %}
+            User does not exist
+          {% elif 'sudo' in user_groups.stdout or 'wheel' in user_groups.stdout %}
+            In Administrative Group ({% if 'sudo' in user_groups.stdout %}sudo{% else %}wheel{% endif %})
+          {% else %}
+            Not in sudo or wheel
+          {% endif %}
+
+    - name: Print administrative group status
+      ansible.builtin.debug:
+        msg: "Admin Group Check: {{ admin_status }}"
