@@ -88,9 +88,7 @@
               netplan generate
               netplan apply
 
-              # =========================
-              # ✅ EXT4 LVM AUTO-EXPANSION
-              # =========================
+             
               rm -f /etc/lvm/devices/system.devices
               vgscan
               pvscan
