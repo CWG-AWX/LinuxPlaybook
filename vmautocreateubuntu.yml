@@ -19,6 +19,9 @@
     # vm_name: ""
     # target_ip: ""
     # target_gateway: ""
+    # vm_cpu: ""
+    # vm_memory_gb: ""
+    # extra_disk_gb: ""
     netmask: "24"
 
     sysprep_path: "/tmp/cloud-init-{{ vm_name }}.yaml"
@@ -35,43 +38,37 @@
           fqdn: "{{ vm_name }}"
 
           users:
-            - name: ubuntu
-              groups: sudo           # Ubuntu uses 'sudo' group, not 'wheel'
+            - name: osadmin
+              groups: sudo
               shell: /bin/bash
               sudo: ALL=(ALL) NOPASSWD:ALL
               lock_passwd: false
 
           chpasswd:
             list: |
-              ubuntu:cwg@2026
+              osadmin:cwg@2026
             expire: false
 
           ssh_pwauth: true
 
-          # Disable cloud-init network management so our Netplan config takes over
           network:
             config: disabled
 
           runcmd:
             - |
               bash -c '
-              # FORCE HOSTNAME
               echo "{{ vm_name }}" > /etc/hostname
               hostnamectl set-hostname "{{ vm_name }}"
               systemctl restart systemd-hostnamed
 
-              # GET PRIMARY INTERFACE (first non-loopback)
               IFACE=$(ip -o link show | awk -F": " '\''{print $2}'\'' | grep -v "lo" | head -n 1)
 
-              # FLUSH ALL IP ADDRESSES AND ROUTES ON THE INTERFACE
               ip addr flush dev "$IFACE"
               ip route flush dev "$IFACE"
 
-              # NUKE ALL EXISTING NETPLAN CONFIGS (equivalent to nmcli connection delete in RHEL)
               rm -f /etc/netplan/*.yaml
               rm -f /etc/netplan/*.yml
 
-              # WRITE FRESH STATIC NETPLAN CONFIG
               cat > /etc/netplan/99-static.yaml <<EOF
               network:
                 version: 2
@@ -88,12 +85,29 @@
 
               chmod 600 /etc/netplan/99-static.yaml
 
-              # APPLY NEW CONFIG
               netplan generate
               netplan apply
+
+              # =========================
+              # ✅ LVM AUTO-EXPANSION LOGIC (ADDED)
+              # =========================
+              rm -f /etc/lvm/devices/system.devices
+              vgscan
+              pvscan
+
+              EXTRA_DISK=$(lsblk -dn -o NAME,TYPE | grep disk | awk "{print \$1}" | grep -vE "sda|vda" | head -n 1)
+
+              if [ -n "$EXTRA_DISK" ]; then
+                pvcreate /dev/$EXTRA_DISK
+                VG_NAME=$(vgs --noheadings -o vg_name | xargs | awk "{print \$1}")
+                if [ -n "$VG_NAME" ]; then
+                  vgextend $VG_NAME /dev/$EXTRA_DISK
+                  lvextend -l +100%FREE /dev/$VG_NAME/root
+                  xfs_growfs /
+                fi
+              fi
               '
 
-            # Ubuntu SSH service is named "ssh", not "sshd"
             - systemctl enable ssh --now
 
     - name: Deploy VM
@@ -106,15 +120,25 @@
         name: "{{ vm_name }}"
         cluster:
           uuid: "{{ cluster_uuid }}"
+
+        vcpus: "{{ vm_cpu | int }}"
+        memory_gb: "{{ vm_memory_gb | int }}"
+
         networks:
           - is_connected: true
             subnet:
               uuid: "{{ subnet_uuid }}"
+
         disks:
           - type: DISK
             bus: SCSI
             clone_image:
               uuid: "{{ image_uuid }}"
+
+          - type: DISK
+            bus: SCSI
+            size_gb: "{{ extra_disk_gb | int }}"
+
         guest_customization:
           type: cloud_init
           script: "{{ lookup('file', sysprep_path) }}"
@@ -123,7 +147,7 @@
       add_host:
         name: "{{ vm_name }}"
         ansible_host: "{{ target_ip }}"
-        ansible_user: ubuntu              # Ubuntu default cloud user
+        ansible_user: osadmin
         ansible_password: "cwg@2026"
         ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
 
@@ -170,7 +194,6 @@
         validate: '/usr/sbin/visudo -cf %s'
 
     - name: Enable SSH pubkey auth
-      # Ubuntu 22.04+ uses drop-in config files under sshd_config.d/
       copy:
         dest: /etc/ssh/sshd_config.d/90-pubkey.conf
         content: "PubkeyAuthentication yes\n"
@@ -180,5 +203,5 @@
   handlers:
     - name: restart ssh
       service:
-        name: ssh          # Ubuntu service name is 'ssh', not 'sshd'
+        name: ssh
         state: restarted
