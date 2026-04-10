@@ -51,44 +51,31 @@
 
           ssh_pwauth: true
 
-          network:
-            config: disabled
-
           runcmd:
             - |
               bash -c '
-              echo "{{ vm_name }}" > /etc/hostname
               hostnamectl set-hostname "{{ vm_name }}"
-              systemctl restart systemd-hostnamed
 
-              IFACE=$(ip -o link show | awk -F": " '\''{print $2}'\'' | grep -v "lo" | head -n 1)
+              # =========================
+              # ✅ REMOVE ALL EXISTING NETWORK CONNECTIONS (NMCLI STYLE)
+              # =========================
+              IFACE=$(nmcli -t -f DEVICE dev status | grep -v lo | head -n 1)
 
-              ip addr flush dev "$IFACE"
-              ip route flush dev "$IFACE"
+              for conn in $(nmcli -t -f NAME connection show); do
+                nmcli connection delete "$conn"
+              done
 
-              rm -f /etc/netplan/*.yaml
-              rm -f /etc/netplan/*.yml
+              nmcli con add type ethernet con-name static-ip ifname "$IFACE" \
+                ipv4.addresses {{ target_ip }}/{{ netmask }} \
+                ipv4.gateway {{ target_gateway }} \
+                ipv4.dns "8.8.8.8,1.1.1.1" \
+                ipv4.method manual
 
-              cat > /etc/netplan/99-static.yaml <<EOF
-              network:
-                version: 2
-                ethernets:
-                  ${IFACE}:
-                    addresses:
-                      - {{ target_ip }}/{{ netmask }}
-                    routes:
-                      - to: default
-                        via: {{ target_gateway }}
-                    nameservers:
-                      addresses: [8.8.8.8, 1.1.1.1]
-              EOF
+              nmcli con up static-ip
 
-              chmod 600 /etc/netplan/99-static.yaml
-
-              netplan generate
-              netplan apply
-
-             
+              # =========================
+              # EXT4 LVM AUTO EXPANSION
+              # =========================
               rm -f /etc/lvm/devices/system.devices
               vgscan
               pvscan
@@ -104,7 +91,6 @@
                 if [ -n "$VG_NAME" ] && [ -n "$LV_PATH" ]; then
                   vgextend $VG_NAME /dev/$EXTRA_DISK
                   lvextend -l +100%FREE $LV_PATH
-
                   resize2fs $LV_PATH
                 fi
               fi
