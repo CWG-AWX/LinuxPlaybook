@@ -4,10 +4,10 @@
   become: yes
   vars:
     new_users:
-      - { name: "MadonnaFakih", pass: "#D@20@nf$!m&??" }
-      - { name: "SeifSemad",    pass: "!$Tr@ct!n0101" }
-      - { name: "YaraMohamed",    pass: "%@te?cH!y0#01" }
-      - { name: "ZeinabMohamed",  pass: "e#eZ@ban!1?%" }
+      - { name: "Madonna", pass: "#d0@n$m&??" }
+      - { name: "Seif",    pass: "!$tr@ct!n0101" }
+      - { name: "Yara",    pass: "%@te?ch!y001" }
+      - { name: "Zeinab",  pass: "eez@ban!" }
 
   tasks:
     - name: Ensure users exist without sudo privileges
