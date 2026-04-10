@@ -1,41 +1,43 @@
 ---
-- name: Create Private Read-Only Users
-  hosts: all
+- name: Fix Typo - Delete SeifSemad and Create SeifEmad
+  hosts: vcash-leg*
   become: yes
   vars:
-    new_users:
-      - { name: "Madonna", pass: "#d0@n$m&??" }
-      - { name: "Seif",    pass: "!$tr@ct!n0101" }
-      - { name: "Yara",    pass: "%@te?ch!y001" }
-      - { name: "Zeinab",  pass: "eez@ban!" }
+    # Defining the fix here
+    old_user: "SeifSemad"
+    new_user_name: "SeifEmad"
+    new_user_pass: "!$Tr@ct!n0101"
 
   tasks:
-    - name: Ensure users exist without sudo privileges
+    - name: Remove the incorrect user and their home directory
       ansible.builtin.user:
-        name: "{{ item.name }}"
-        password: "{{ item.pass | password_hash('sha512') }}"
+        name: "{{ old_user }}"
+        state: absent
+        remove: yes  # This deletes /home/SeifSemad as well
+        force: yes   # Forces deletion even if the user is logged in
+
+    - name: Create the correct user (SeifEmad)
+      ansible.builtin.user:
+        name: "{{ new_user_name }}"
+        password: "{{ new_user_pass | password_hash('sha512') }}"
         shell: /bin/bash
         state: present
         create_home: yes
         groups: []
         append: no
-      loop: "{{ new_users }}"  # This line MUST be here and aligned with 'ansible.builtin.user'
 
-    - name: Restrict home directories so users cannot see each other's files
+    - name: Restrict home directory for SeifEmad
       ansible.builtin.file:
-        path: "/home/{{ item.name }}"
+        path: "/home/{{ new_user_name }}"
         mode: '0700'
-        owner: "{{ item.name }}"
-        group: "{{ item.name }}"
-      loop: "{{ new_users }}"
+        owner: "{{ new_user_name }}"
+        group: "{{ new_user_name }}"
 
-    - name: Verify permissions
-      ansible.builtin.shell: "ls -ld /home/{{ item.name }}"
-      register: ls_output
-      loop: "{{ new_users }}"
+    - name: Verify the change
+      ansible.builtin.shell: "id {{ new_user_name }} && ls -ld /home/{{ new_user_name }}"
+      register: verify_fix
       changed_when: false
 
-    - name: Show Permission Results
+    - name: Show Verification
       ansible.builtin.debug:
-        msg: "{{ item.stdout }}"
-      loop: "{{ ls_output.results }}"
+        msg: "{{ verify_fix.stdout }}"
