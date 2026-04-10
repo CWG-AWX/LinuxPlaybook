@@ -5,6 +5,9 @@
   
   vars:
     falcon_cid: "712BFC65A93944C0A66711B2541AC1D3-4B"
+    ansible_connection: ssh
+    ansible_shell_type: sh
+    ansible_port: 22
     
     # Package names mapped from your repository files
     falcon_pkg_map:
