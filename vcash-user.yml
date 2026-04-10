@@ -1,5 +1,5 @@
 ---
-- name: Create Read-Only Users on Legacy Hosts
+- name: Create Private Read-Only Users
   hosts: all
   become: yes
   vars:
@@ -13,22 +13,29 @@
     - name: Ensure users exist without sudo privileges
       ansible.builtin.user:
         name: "{{ item.name }}"
-        # Password is hashed at runtime for security
         password: "{{ item.pass | password_hash('sha512') }}"
         shell: /bin/bash
         state: present
         create_home: yes
-        # Explicitly excluding sudo/wheel groups to ensure no admin access
         groups: []
         append: no
+      loop: "{{ new_users }}"  # This line MUST be here and aligned with 'ansible.builtin.user'
 
-    - name: Verify no sudo access for the new users
-      ansible.builtin.shell: "groups {{ item.name }}"
-      register: group_check
+    - name: Restrict home directories so users cannot see each other's files
+      ansible.builtin.file:
+        path: "/home/{{ item.name }}"
+        mode: '0700'
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+      loop: "{{ new_users }}"
+
+    - name: Verify permissions
+      ansible.builtin.shell: "ls -ld /home/{{ item.name }}"
+      register: ls_output
       loop: "{{ new_users }}"
       changed_when: false
 
-    - name: Display group status
+    - name: Show Permission Results
       ansible.builtin.debug:
-        msg: "User {{ item.item.name }} belongs to: {{ item.stdout }}"
-      loop: "{{ group_check.results }}"
+        msg: "{{ item.stdout }}"
+      loop: "{{ ls_output.results }}"
