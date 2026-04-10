@@ -89,21 +89,25 @@
               netplan apply
 
               # =========================
-              # ✅ LVM AUTO-EXPANSION LOGIC (ADDED)
+              # ✅ EXT4 LVM AUTO-EXPANSION
               # =========================
               rm -f /etc/lvm/devices/system.devices
               vgscan
               pvscan
 
-              EXTRA_DISK=$(lsblk -dn -o NAME,TYPE | grep disk | awk "{print \$1}" | grep -vE "sda|vda" | head -n 1)
+              EXTRA_DISK=$(lsblk -dn -o NAME,TYPE | grep disk | awk '\''{print $1}'\'' | grep -vE "sda|vda" | head -n 1)
 
               if [ -n "$EXTRA_DISK" ]; then
                 pvcreate /dev/$EXTRA_DISK
-                VG_NAME=$(vgs --noheadings -o vg_name | xargs | awk "{print \$1}")
-                if [ -n "$VG_NAME" ]; then
+
+                VG_NAME=$(vgs --noheadings -o vg_name | xargs | awk '\''{print $1}'\'')
+                LV_PATH=$(lvdisplay -C -o lv_path --noheadings | head -n 1)
+
+                if [ -n "$VG_NAME" ] && [ -n "$LV_PATH" ]; then
                   vgextend $VG_NAME /dev/$EXTRA_DISK
-                  lvextend -l +100%FREE /dev/$VG_NAME/root
-                  xfs_growfs /
+                  lvextend -l +100%FREE $LV_PATH
+
+                  resize2fs $LV_PATH
                 fi
               fi
               '
