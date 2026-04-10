@@ -1,29 +1,34 @@
 ---
-- name: Create Administrative User with Home Directory
+- name: Create Read-Only Users on Legacy Hosts
   hosts: all
   become: yes
   vars:
-    # Dynamically set the admin group based on the OS family
-    admin_group: "{{ 'sudo' if ansible_os_family == 'Debian' else 'wheel' }}"
+    new_users:
+      - { name: "Madonna", pass: "#D@20@nf$!m&??" }
+      - { name: "Seif",    pass: "!$Tr@ct!n0101" }
+      - { name: "Yara",    pass: "%@te?cH!y0#01" }
+      - { name: "Zeinab",  pass: "e#eZ@ban!1?%" }
 
   tasks:
-    - name: Create user MohanedMohamed with administrative access
+    - name: Ensure users exist without sudo privileges
       ansible.builtin.user:
-        name: MohanedMohamed
-        password: "{{ 'PASSWORD: !T$ec&@19*0?1' | password_hash('sha512') }}"
+        name: "{{ item.name }}"
+        # Password is hashed at runtime for security
+        password: "{{ item.pass | password_hash('sha512') }}"
         shell: /bin/bash
-        groups: "{{ admin_group }}"
-        append: yes
         state: present
         create_home: yes
-        home: /home/MohanedMohamed
-      ignore_errors: yes
+        # Explicitly excluding sudo/wheel groups to ensure no admin access
+        groups: []
+        append: no
 
-    - name: Set correct permissions on the home directory
-      ansible.builtin.file:
-        path: /home/MohanedMohamed
-        owner: MohanedMohamed
-        group: MohanedMohamed
-        mode: '0755'
-        state: directory
-      ignore_errors: yes
+    - name: Verify no sudo access for the new users
+      ansible.builtin.shell: "groups {{ item.name }}"
+      register: group_check
+      loop: "{{ new_users }}"
+      changed_when: false
+
+    - name: Display group status
+      ansible.builtin.debug:
+        msg: "User {{ item.item.name }} belongs to: {{ item.stdout }}"
+      loop: "{{ group_check.results }}"
