@@ -12,7 +12,7 @@
 
     # --- INFRA ---
     cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
-    subnet_uuid: "dc503076-5c86-43b3-a19f-d1d02a92359f"
+    subnet_uuid: "cc5b686a-096c-434d-b55b-fec9494f8675"
     image_uuid: "106386af-ceb2-44d7-bdba-fb0333addd59"
 
     # --- AWX SURVEY INPUTS ---
