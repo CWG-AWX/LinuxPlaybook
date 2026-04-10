@@ -1,38 +1,41 @@
 ---
-- name: Rename SeifSemad to SeifEmad
-  hosts: all
+- name: Create Private Read-Only Users
+  hosts: vcash-leg*
   become: yes
   vars:
-    old_name: "SeifSemad"
-    new_name: "SeifEmad"
+    new_users:
+      - { name: "AhmedEltartoushy", pass: "./T@rt0u#Y@E!" }
+      #- { name: "Seif",    pass: "!$Tr@ct!n0101" }
+      #- { name: "Yara",    pass: "%@te?cH!y0#01" }
+      #- { name: "Zeinab",  pass: "e#eZ@ban!1?%" }
 
   tasks:
-    - name: "Step 1: Change the username"
-      ansible.builtin.command: "usermod -l {{ new_name }} {{ old_name }}"
-      register: rename_user
-      failed_when: rename_user.rc != 0 and rename_user.rc != 9 # 9 means user doesn't exist (already renamed)
+    - name: Ensure users exist without sudo privileges
+      ansible.builtin.user:
+        name: "{{ item.name }}"
+        password: "{{ item.pass | password_hash('sha512') }}"
+        shell: /bin/bash
+        state: present
+        create_home: yes
+        groups: []
+        append: no
+      loop: "{{ new_users }}"  # This line MUST be here and aligned with 'ansible.builtin.user'
 
-    - name: "Step 2: Rename the primary group"
-      ansible.builtin.command: "groupmod -n {{ new_name }} {{ old_name }}"
-      when: rename_user.changed
-
-    - name: "Step 3: Move and rename the home directory"
-      ansible.builtin.command: "usermod -d /home/{{ new_name }} -m {{ new_name }}"
-      when: rename_user.changed
-
-    - name: "Step 4: Ensure permissions are correct on the new home path"
+    - name: Restrict home directories so users cannot see each other's files
       ansible.builtin.file:
-        path: "/home/{{ new_name }}"
-        state: directory
-        owner: "{{ new_name }}"
-        group: "{{ new_name }}"
+        path: "/home/{{ item.name }}"
         mode: '0700'
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+      loop: "{{ new_users }}"
 
-    - name: Verify the rename
-      ansible.builtin.shell: "id {{ new_name }} && ls -ld /home/{{ new_name }}"
-      register: final_check
+    - name: Verify permissions
+      ansible.builtin.shell: "ls -ld /home/{{ item.name }}"
+      register: ls_output
+      loop: "{{ new_users }}"
       changed_when: false
 
-    - name: Show Results
+    - name: Show Permission Results
       ansible.builtin.debug:
-        msg: "{{ final_check.stdout }}"
+        msg: "{{ item.stdout }}"
+      loop: "{{ ls_output.results }}"
