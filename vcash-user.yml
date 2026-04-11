@@ -1,6 +1,6 @@
 ---
 - name: Create Private Read-Only Users via AWX Survey
-  hosts: vcash-leg*
+  hosts: all
   become: yes
   vars:
     # This variable will come from the AWX Survey
