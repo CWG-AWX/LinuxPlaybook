@@ -1,13 +1,13 @@
 ---
-- name: Create Private Read-Only Users
+- name: Create Private Read-Only Users via AWX Survey
   hosts: vcash-leg*
   become: yes
   vars:
-    new_users:
-      - { name: "AhmedEltartoushy", pass: "./T@rt0u#Y@E!" }
-      #- { name: "Seif",    pass: "!$Tr@ct!n0101" }
-      #- { name: "Yara",    pass: "%@te?cH!y0#01" }
-      #- { name: "Zeinab",  pass: "e#eZ@ban!1?%" }
+    # This variable will come from the AWX Survey
+    # Expected format: 
+    # - { name: "user1", pass: "pass1" }
+    # - { name: "user2", pass: "pass2" }
+    final_user_list: "{{ survey_user_data | from_yaml }}"
 
   tasks:
     - name: Ensure users exist without sudo privileges
@@ -19,23 +19,23 @@
         create_home: yes
         groups: []
         append: no
-      loop: "{{ new_users }}"  # This line MUST be here and aligned with 'ansible.builtin.user'
+      loop: "{{ final_user_list }}"
 
-    - name: Restrict home directories so users cannot see each other's files
+    - name: Restrict home directories (0700)
       ansible.builtin.file:
         path: "/home/{{ item.name }}"
         mode: '0700'
         owner: "{{ item.name }}"
         group: "{{ item.name }}"
-      loop: "{{ new_users }}"
+      loop: "{{ final_user_list }}"
 
     - name: Verify permissions
       ansible.builtin.shell: "ls -ld /home/{{ item.name }}"
       register: ls_output
-      loop: "{{ new_users }}"
+      loop: "{{ final_user_list }}"
       changed_when: false
 
-    - name: Show Permission Results
+    - name: Show Results
       ansible.builtin.debug:
         msg: "{{ item.stdout }}"
       loop: "{{ ls_output.results }}"
