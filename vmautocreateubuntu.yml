@@ -58,11 +58,7 @@
 
              
               IFACE=$(nmcli -t -f DEVICE dev status | grep -v lo | head -n 1)
-
-              for conn in $(nmcli -t -f NAME connection show); do
-                nmcli connection delete "$conn"
-              done
-
+              for conn in $(nmcli -t -f NAME connection show); do nmcli connection delete "$conn"; done
               nmcli con add type ethernet con-name static-ip ifname "$IFACE" \
                 ipv4.addresses {{ target_ip }}/{{ netmask }} \
                 ipv4.gateway {{ target_gateway }} \
