@@ -1,0 +1,91 @@
+---
+- name: Deploy Checkmk Agent and Password Expiry Check
+  hosts: all
+  gather_facts: yes
+  vars:
+    # Path to the file in your synced GitHub project
+    msi_source: "check_mk_agent.msi"
+    temp_path: 'C:\temp\check_mk_agent.msi'
+    local_check_path: 'C:\ProgramData\checkmk\agent\local'
+    script_name: "check_password_expiry.ps1"
+
+  tasks:
+    # 1. Check if the agent service already exists and is running
+    - name: Verify if Checkmk Service is already running
+      ansible.windows.win_service_info:
+        name: "CheckMkService"
+      register: checkmk_svc
+
+    # 2. Block for Installation (Only runs if service is missing or stopped)
+    - name: Installation Block
+      block:
+        - name: Ensure C:\temp exists
+          ansible.windows.win_file:
+            path: 'C:\temp'
+            state: directory
+
+        - name: Copy Checkmk MSI from GitHub Project to Server
+          ansible.windows.win_copy:
+            src: "{{ msi_source }}"
+            dest: "{{ temp_path }}"
+
+        - name: Install Checkmk Agent
+          ansible.windows.win_package:
+            path: "{{ temp_path }}"
+            state: present
+
+        - name: Ensure Checkmk Service is started and automatic
+          ansible.windows.win_service:
+            name: "CheckMkService"
+            start_mode: auto
+            state: started
+      when: not (checkmk_svc.exists and checkmk_svc.services[0].state == 'running')
+
+    # 3. Create the Password Expiry Script
+    - name: Ensure local check directory exists
+      ansible.windows.win_file:
+        path: "{{ local_check_path }}"
+        state: directory
+
+    - name: Deploy Password Expiry PowerShell Script
+      ansible.windows.win_copy:
+        dest: "{{ local_check_path }}\\{{ script_name }}"
+        content: |
+          # Checkmk Local Check: Windows Password Expiration
+          $WarningDays = 7
+          $CriticalDays = 0
+          # Get all local users who are enabled and have a password that expires
+          $users = Get-LocalUser | Where-Object { $_.Enabled -eq $true -and $_.PasswordExpires -ne $null }
+          foreach ($user in $users) {
+              $expiryDate = $user.PasswordExpires
+              $daysLeft = ($expiryDate - (Get-Date)).Days
+              $userName = $user.Name
+
+              if ($daysLeft -le $CriticalDays) {
+                  $state = 2
+                  $statusText = "CRITICAL"
+              } elseif ($daysLeft -le $WarningDays) {
+                  $state = 1
+                  $statusText = "WARNING"
+              } else {
+                  $state = 0
+                  $statusText = "OK"
+              }
+
+              Write-Host "$state PasswordExpiry_$userName days_left=$daysLeft $statusText: Password for $userName expires in $daysLeft days"
+          }
+
+    # 4. Final Status Output
+    - name: Re-check service status for reporting
+      ansible.windows.win_service_info:
+        name: "CheckMkService"
+      register: final_status
+
+    - name: Deployment Summary
+      ansible.builtin.debug:
+        msg: 
+          - "--- DEPLOYMENT REPORT ---"
+          - "Target IP: {{ ansible_host | default(ansible_ip_addresses[0]) }}"
+          - "Hostname: {{ inventory_hostname }}"
+          - "Checkmk Agent Status: {{ final_status.services[0].state | default('NOT INSTALLED') }}"
+          - "Local Check: {{ local_check_path }}\\{{ script_name }} deployed."
