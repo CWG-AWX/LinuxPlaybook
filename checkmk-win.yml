@@ -6,7 +6,7 @@
       ansible.windows.win_file:
         path: C:\ProgramData\checkmk\agent\local
         state: directory
-
+ 
     - name: Deploy Password Expiry PowerShell Script
       ansible.windows.win_copy:
         dest: C:\ProgramData\checkmk\agent\local\check_password_expiry.ps1
@@ -20,4 +20,3 @@
               elseif ($daysLeft -le $WarningDays) { $state = 1; $statusText = "WARNING" }
               else { $state = 0; $statusText = "OK" }
               "{0} PasswordExpiry_{1} days_left={2} {3}: Password for {1} expires in {2} days" -f $state, $user.Name, $daysLeft, $statusText
-          }
