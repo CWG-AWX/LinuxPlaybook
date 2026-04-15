@@ -12,8 +12,8 @@
 
     # --- INFRA ---
     cluster_uuid: "0005e57d-dfbe-c16d-781a-7cc255073a55"
-    subnet_uuid: "cc5b686a-096c-434d-b55b-fec9494f8675"
-    image_uuid: "106386af-ceb2-44d7-bdba-fb0333addd59"
+    subnet_uuid: "9181d888-d3f7-41b2-b67e-c6db5c4ffe39"
+    image_uuid: "5f6c4c2d-c153-4683-bd06-73b7ae3b0fc6"
 
     # --- AWX SURVEY INPUTS ---
     # vm_name: ""
