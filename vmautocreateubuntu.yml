@@ -38,7 +38,7 @@
           fqdn: "{{ vm_name }}"
 
           users:
-            - name: osadmin
+            - name: fiftbuser
               groups: sudo
               shell: /bin/bash
               sudo: ALL=(ALL) NOPASSWD:ALL
@@ -46,7 +46,7 @@
 
           chpasswd:
             list: |
-              osadmin:cwg@2026
+              fiftbuser:cwg@2026
             expire: false
 
           ssh_pwauth: true
@@ -129,59 +129,59 @@
       add_host:
         name: "{{ vm_name }}"
         ansible_host: "{{ target_ip }}"
-        ansible_user: osadmin
+        ansible_user: fiftbuser
         ansible_password: "cwg@2026"
         ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
 
-    - name: Wait for VM to be ready
-      wait_for_connection:
-        delay: 45
-        timeout: 120
-      delegate_to: "{{ vm_name }}"
+   # - name: Wait for VM to be ready
+   #   wait_for_connection:
+   #     delay: 45
+   #     timeout: 120
+   #   delegate_to: "{{ vm_name }}"
 
-    - name: Remove temp cloud-init file
-      file:
-        path: "{{ sysprep_path }}"
-        state: absent
+   # - name: Remove temp cloud-init file
+    #  file:
+    #    path: "{{ sysprep_path }}"
+    #    state: absent
 
 # =========================================
 # POST CONFIG
 # =========================================
-- name: Bootstrap Ubuntu Node for AWX
-  hosts: "{{ vm_name }}"
-  become: yes
+#- name: Bootstrap Ubuntu Node for AWX
+ # hosts: "{{ vm_name }}"
+ # become: yes
 
-  vars:
-    ansible_user_name: "ansible"
-    awx_pub_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBEuxy3oDAAUDqVY4pDOISchf5DDrU491kluibL64HqK awx-ansible"
+  #vars:
+   # ansible_user_name: "ansible"
+    #awx_pub_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBEuxy3oDAAUDqVY4pDOISchf5DDrU491kluibL64HqK awx-ansible"
 
-  tasks:
+  #tasks:
 
-    - name: Create ansible user
-      user:
-        name: "{{ ansible_user_name }}"
-        shell: /bin/bash
-        create_home: yes
+   # - name: Create ansible user
+    #  user:
+     #   name: "{{ ansible_user_name }}"
+      #  shell: /bin/bash
+       # create_home: yes
 
-    - name: Add SSH key
-      authorized_key:
-        user: "{{ ansible_user_name }}"
-        key: "{{ awx_pub_key }}"
+   # - name: Add SSH key
+   #   authorized_key:
+   #     user: "{{ ansible_user_name }}"
+   #     key: "{{ awx_pub_key }}"
 
-    - name: Enable sudo
-      copy:
-        dest: "/etc/sudoers.d/{{ ansible_user_name }}"
-        content: "{{ ansible_user_name }} ALL=(ALL) NOPASSWD:ALL"
-        mode: '0440'
-        validate: '/usr/sbin/visudo -cf %s'
+   # - name: Enable sudo
+   #   copy:
+   #     dest: "/etc/sudoers.d/{{ ansible_user_name }}"
+   #     content: "{{ ansible_user_name }} ALL=(ALL) NOPASSWD:ALL"
+   #     mode: '0440'
+   #     validate: '/usr/sbin/visudo -cf %s'
 
-    - name: Enable SSH pubkey auth
-      copy:
-        dest: /etc/ssh/sshd_config.d/90-pubkey.conf
-        content: "PubkeyAuthentication yes\n"
-        mode: '0644'
-      notify: restart ssh
-
+   # - name: Enable SSH pubkey auth
+   #   copy:
+   #     dest: /etc/ssh/sshd_config.d/90-pubkey.conf
+   #     content: "PubkeyAuthentication yes\n"
+   #     mode: '0644'
+   #   notify: restart ssh
+#
   handlers:
     - name: restart ssh
       service:
