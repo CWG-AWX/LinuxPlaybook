@@ -1,0 +1,14 @@
+---
+- name: Manage Checkmk Agent Service
+  hosts: all
+  tasks:
+    - name: Ensure CheckMkService is started and set to automatic
+      ansible.windows.win_service:
+        name: CheckMkService
+        state: started
+        start_mode: auto
+      register: service_status
+
+    - name: Report Service Status
+      ansible.builtin.debug:
+        msg: "CheckMkService is now {{ service_status.state }} on {{ inventory_hostname }}"
