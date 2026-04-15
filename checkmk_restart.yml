@@ -1,13 +1,43 @@
----
-- name: Restart Checkmk Agent Service
-  hosts: all
-  tasks:
-    - name: Restart the Checkmk service
-      ansible.windows.win_service:
-        name: CheckMkService
-        state: restarted
-      register: restart_result
+#---
+#- name: Restart Checkmk Agent Service
+#  hosts: all
+#  tasks:
+#    - name: Restart the Checkmk service
+#      ansible.windows.win_service:
+#        name: CheckMkService
+#        state: restarted
+#      register: restart_result
+#
+#    - name: Confirm new status
+#      ansible.builtin.debug:
+#        msg: "CheckMkService on {{ inventory_hostname }} is now {{ restart_result.state }}"
 
-    - name: Confirm new status
+
+---
+- name: Deploy Checkmk Local Check Script
+  hosts: all
+  gather_facts: no
+  vars:
+    script_source: "check_password_expiry.ps1"
+    script_dest: 'C:\ProgramData\checkmk\agent\local\check_password_expiry.ps1'
+
+  tasks:
+    - name: Ensure Checkmk local directory exists
+      ansible.windows.win_file:
+        path: 'C:\ProgramData\checkmk\agent\local'
+        state: directory
+
+    - name: Copy PowerShell script to the server
+      ansible.windows.win_copy:
+        src: "{{ script_source }}"
+        dest: "{{ script_dest }}"
+
+    - name: Execute the script to verify output
+      ansible.windows.win_powershell:
+        script: |
+          & "{{ script_dest }}"
+      register: script_output
+
+    - name: Display Script Output
       ansible.builtin.debug:
-        msg: "CheckMkService on {{ inventory_hostname }} is now {{ restart_result.state }}"
+        var: script_output.host_out
