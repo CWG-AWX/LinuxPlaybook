@@ -1,22 +1,57 @@
 ---
-- name: Deploy Checkmk Password Expiry Script to Windows
+- name: Force Update Checkmk Password Expiry Script
   hosts: all
+  gather_facts: no
+  vars:
+    local_check_dir: 'C:\ProgramData\checkmk\agent\local'
+    script_path: 'C:\ProgramData\checkmk\agent\local\check_password_expiry.ps1'
+
   tasks:
+    # 1. Ensure the directory exists
     - name: Ensure Checkmk local directory exists
       ansible.windows.win_file:
-        path: C:\ProgramData\checkmk\agent\local
+        path: "{{ local_check_dir }}"
         state: directory
- 
-    - name: Deploy Password Expiry PowerShell Script
+
+    # 2. Delete existing file if it exists to ensure a clean overwrite
+    - name: Remove old script version
+      ansible.windows.win_file:
+        path: "{{ script_path }}"
+        state: absent
+
+    # 3. Create the new script with your specific fixes
+    - name: Deploy fixed PowerShell script
       ansible.windows.win_copy:
-        dest: C:\ProgramData\checkmk\agent\local\check_password_expiry.ps1
+        dest: "{{ script_path }}"
         content: |
-          $WarningDays = 7
-          $CriticalDays = 0
+          Write-Host "<<<local>>>"
+          
+          # Get all local users who are enabled and have a password that expires
           $users = Get-LocalUser | Where-Object { $_.Enabled -eq $true -and $_.PasswordExpires -ne $null }
+          
           foreach ($user in $users) {
-              $daysLeft = ($user.PasswordExpires - (Get-Date)).Days
-              if ($daysLeft -le $CriticalDays) { $state = 2; $statusText = "CRITICAL" }
-              elseif ($daysLeft -le $WarningDays) { $state = 1; $statusText = "WARNING" }
+              $expiryDate = $user.PasswordExpires
+              $daysLeft = ($expiryDate - (Get-Date)).Days
+              $userName = $user.Name
+          
+              if ($daysLeft -le 0) { $state = 2; $statusText = "CRITICAL" }
+              elseif ($daysLeft -le 7) { $state = 1; $statusText = "WARNING" }
               else { $state = 0; $statusText = "OK" }
-              "{0} PasswordExpiry_{1} days_left={2} {3}: Password for {1} expires in {2} days" -f $state, $user.Name, $daysLeft, $statusText
+          
+              # FIX: Added a space after $statusText so PowerShell doesn't get confused by the colon
+              Write-Host "$state PasswordExpiry_$userName days_left=$daysLeft $statusText : Password for $userName expires in $daysLeft days"
+          }
+
+    # 4. Verify it works by running it immediately
+    - name: Verify script output
+      ansible.windows.win_powershell:
+        script: |
+          Set-Location "{{ local_check_dir }}"
+          .\check_password_expiry.ps1
+      register: verification_output
+
+    - name: Display verification results
+      ansible.builtin.debug:
+        msg: 
+          - "--- VERIFICATION OUTPUT ---"
+          - "{{ verification_output.host_out }}"
