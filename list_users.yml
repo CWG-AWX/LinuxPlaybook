@@ -1,0 +1,22 @@
+---
+- name: List all usernames on Linux servers
+  hosts: all
+  gather_facts: false
+  become: true
+
+  tasks:
+
+    - name: Read /etc/passwd and extract usernames
+      shell: "cut -d: -f1 /etc/passwd"
+      register: all_users
+      changed_when: false
+
+    - name: Display usernames on each host
+      debug:
+        msg: "Users on {{ inventory_hostname }}: {{ all_users.stdout_lines }}"
+
+    - name: Save usernames to a file on the remote host
+      copy:
+        content: "{{ all_users.stdout }}\n"
+        dest: "/tmp/userlist_{{ inventory_hostname }}.txt"
+      when: save_to_file | default(false) | bool
