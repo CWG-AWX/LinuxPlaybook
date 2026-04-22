@@ -1,22 +1,16 @@
 ---
-- name: List all usernames on Linux servers
+- name: List human usernames on Linux servers
   hosts: all
   gather_facts: false
   become: true
 
   tasks:
 
-    - name: Read /etc/passwd and extract usernames
-      shell: "cut -d: -f1 /etc/passwd"
-      register: all_users
+    - name: Extract human users (UID >= 1000, excluding nobody)
+      shell: "awk -F: '$3 >= 1000 && $3 < 65534 {print $1}' /etc/passwd"
+      register: human_users
       changed_when: false
 
-    - name: Display usernames on each host
+    - name: Display human usernames per host
       debug:
-        msg: "Users on {{ inventory_hostname }}: {{ all_users.stdout_lines }}"
-
-    - name: Save usernames to a file on the remote host
-      copy:
-        content: "{{ all_users.stdout }}\n"
-        dest: "/tmp/userlist_{{ inventory_hostname }}.txt"
-      when: save_to_file | default(false) | bool
+        msg: "Human users on {{ inventory_hostname }}: {{ human_users.stdout_lines }}"
