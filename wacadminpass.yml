@@ -1,0 +1,40 @@
+---
+# =============================================================================
+# Playbook: change_wacadmin_password.yml
+# Description: Changes the password for the local user 'wacadmin' on all
+#              Windows hosts and sets the password to never expire.
+# Target:      All Windows hosts (configure your inventory/limit in AWX)
+# =============================================================================
+
+- name: Change wacadmin password and set to never expire
+  hosts: all
+  gather_facts: false
+
+  vars:
+    target_user: "wacadmin"
+    target_password: "wac@2025"
+
+  tasks:
+
+    - name: Ensure the user '{{ target_user }}' exists and update password
+      ansible.windows.win_user:
+        name: "{{ target_user }}"
+        password: "{{ target_password }}"
+        password_never_expires: true
+        state: present
+        update_password: always
+      register: user_result
+
+    - name: Confirm change was applied
+      ansible.builtin.debug:
+        msg: >
+          User '{{ target_user }}' on host '{{ inventory_hostname }}':
+          password updated and set to never expire.
+      when: user_result is succeeded
+
+    - name: Report failure if user update did not succeed
+      ansible.builtin.fail:
+        msg: >
+          Failed to update user '{{ target_user }}' on '{{ inventory_hostname }}'.
+          Check WinRM connectivity and privileges.
+      when: user_result is failed
