@@ -1,0 +1,57 @@
+---
+# =============================================================================
+# Playbook: change_wacadmin_password.yml
+# Description: Creates the local user 'wacadmin' if it does not exist, sets
+#              the password to 'wac@2025', and configures it to never expire.
+#              If the user already exists, the password is updated in place.
+# Target:      All Windows hosts (configure your inventory/limit in AWX)
+# =============================================================================
+
+- name: Create wacadmin user, set password and configure to never expire
+  hosts: all
+  gather_facts: false
+
+  vars:
+    target_user: "wacadmin"
+    target_password: "wac@2025"
+    target_description: "WAC Administrator account"
+    target_fullname: "WAC Admin"
+
+  tasks:
+
+    - name: Create or update local user '{{ target_user }}'
+      ansible.windows.win_user:
+        name: "{{ target_user }}"
+        fullname: "{{ target_fullname }}"
+        description: "{{ target_description }}"
+        password: "{{ target_password }}"
+        password_never_expires: true
+        user_cannot_change_password: false
+        account_disabled: false
+        state: present
+        update_password: always
+      register: user_result
+
+    - name: Add '{{ target_user }}' to the local Administrators group
+      ansible.windows.win_group_membership:
+        name: Administrators
+        members:
+          - "{{ target_user }}"
+        state: present
+      register: group_result
+
+    - name: Confirm user was created or updated successfully
+      ansible.builtin.debug:
+        msg: >
+          User '{{ target_user }}' on host '{{ inventory_hostname }}':
+          {{ 'created' if user_result.changed else 'already existed — updated' }}.
+          Password set and configured to never expire.
+          Added to Administrators group: {{ group_result.changed }}.
+      when: user_result is succeeded
+
+    - name: Report failure if user creation or update did not succeed
+      ansible.builtin.fail:
+        msg: >
+          Failed to create/update user '{{ target_user }}' on '{{ inventory_hostname }}'.
+          Check WinRM connectivity and that the executing credential has local admin rights.
+      when: user_result is failed
