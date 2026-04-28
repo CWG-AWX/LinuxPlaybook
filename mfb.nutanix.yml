@@ -2,8 +2,8 @@
 plugin: nutanix.ncp.ntnx_prism_vm_inventory
 #plugin: nutanix.ncp.ntnx_inventory
 nutanix_hostname: "10.20.24.66" 
-#nutanix_username: "michael"
-#nutanix_password: "Oba@2024" 
+nutanix_username: "michael"
+nutanix_password: "Oba@2024" 
 validate_certs: false
 fetch_all_entities: true
 hostvars_prefix: "ntnx_"
