@@ -2,8 +2,10 @@ plugin: vmware.vmware.vms
 strict: False
 validate_certs: False
 with_hostname: True
-# Use the new vCenter IP you provided
+# Ensure this matches your vCenter IP
 host: 192.168.92.101
+
+# This section helps group your VMs in AWX
 keyed_groups:
   - key: runtime.powerState
     prefix: state
