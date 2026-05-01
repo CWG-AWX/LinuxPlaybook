@@ -1,0 +1,10 @@
+plugin: community.vmware.vmware_vm_inventory
+strict: False
+validate_certs: False
+with_hostname: True
+# Optional: Group VMs by their power state or folder
+keyed_groups:
+  - key: runtime.powerState
+    prefix: state
+  - key: config.guestId
+    prefix: os
