@@ -2,4 +2,5 @@
 collections:
   #- name: https://galaxy.ansible.com/download/nutanix-ncp-1.9.1.tar.gz
   - name: vmware.vmware
+    version: 3.9.0
   #- name: https://galaxy.ansible.com/download/community-general-8.2.0.tar.gz
