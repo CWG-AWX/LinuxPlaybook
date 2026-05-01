@@ -1,8 +1,9 @@
-plugin: community.vmware.vmware_vm_inventory
+plugin: vmware.vmware.vms
 strict: False
 validate_certs: False
 with_hostname: True
-# Optional: Group VMs by their power state or folder
+# Use the new vCenter IP you provided
+host: 192.168.92.101
 keyed_groups:
   - key: runtime.powerState
     prefix: state
