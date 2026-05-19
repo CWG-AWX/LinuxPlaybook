@@ -1,61 +1,21 @@
 ---
-- name: Audit Zabbix Agent installation status
+- name: Identify hosts missing Zabbix Agent
   hosts: all
   gather_facts: yes
-  tasks:
+  ignore_unreachable: yes  # Automatically skips unreachable hosts without failing the play
 
-    # -------------------------------------------------------------------------
-    # 1. Gather Package Facts
-    # -------------------------------------------------------------------------
-    - name: Gather the package facts
-      ansible.builtin.package_facts:
+  tasks:
+    - name: Check if zabbix-agent or zabbix-agent2 is installed
+      package_facts:
         manager: auto
 
-    # -------------------------------------------------------------------------
-    # 2. Check for Zabbix Agent v1
-    # -------------------------------------------------------------------------
-    - name: Check if Zabbix Agent (v1) is installed
-      ansible.builtin.set_fact:
-        zabbix_agent_v1_installed: "{{ 'zabbix-agent' in ansible_facts.packages }}"
+    - name: Set a fact if Zabbix is missing
+      set_fact:
+        zabbix_missing: "{{ 'zabbix-agent' not in ansible_facts.packages and 'zabbix-agent2' not in ansible_facts.packages }}"
 
-    - name: Get Zabbix Agent (v1) version if installed
-      ansible.builtin.set_fact:
-        zabbix_agent_v1_version: "{{ ansible_facts.packages['zabbix-agent'][0]['version'] }}"
-      when: zabbix_agent_v1_installed
-
-    # -------------------------------------------------------------------------
-    # 3. Check for Zabbix Agent 2
-    # -------------------------------------------------------------------------
-    - name: Check if Zabbix Agent 2 is installed
-      ansible.builtin.set_fact:
-        zabbix_agent_v2_installed: "{{ 'zabbix-agent2' in ansible_facts.packages }}"
-
-    - name: Get Zabbix Agent 2 version if installed
-      ansible.builtin.set_fact:
-        zabbix_agent_v2_version: "{{ ansible_facts.packages['zabbix-agent2'][0]['version'] }}"
-      when: zabbix_agent_v2_installed
-
-    # -------------------------------------------------------------------------
-    # 4. Generate Clean Summary Output
-    # -------------------------------------------------------------------------
-    - name: Display Zabbix Agent status summary
-      ansible.builtin.debug:
-        msg:
-          - "OS Family: {{ ansible_os_family }}"
-          - "Zabbix Agent (v1) Installed: {{ zabbix_agent_v1_installed }}"
-          - "Zabbix Agent (v1) Version: {{ zabbix_agent_v1_version | default('N/A') }}"
-          - "Zabbix Agent 2 Installed: {{ zabbix_agent_v2_installed }}"
-          - "Zabbix Agent 2 Version: {{ zabbix_agent_v2_version | default('N/A') }}"
-
-    # -------------------------------------------------------------------------
-    # 5. Fail or Warn (Optional AWX Visibility)
-    # -------------------------------------------------------------------------
-    # Un-comment this section if you want AWX to explicitly mark the host as "Failed" 
-    # when neither agent is found.
-    #
-    # - name: Assert that at least one Zabbix Agent is installed
-    #   ansible.builtin.assert:
-    #     that:
-    #       - zabbix_agent_v1_installed or zabbix_agent_v2_installed
-    #     fail_msg: "CRITICAL: No Zabbix Agent or Zabbix Agent 2 found on this host!"
-    #     success_msg: "OK: Zabbix monitoring agent is present."
+    - name: Display missing hosts at the end of the play
+      run_once: true
+      debug:
+        msg: >
+          The following hosts do not have zabbix-agent or zabbix-agent2 installed:
+          {{ ansible_play_hosts | map('extract', hostvars) | selectattr('zabbix_missing', 'defined') | selectattr('zabbix_missing', 'equalto', true) | map(attribute='inventory_hostname') | list }}
