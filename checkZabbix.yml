@@ -1,0 +1,190 @@
+---
+# =============================================================================
+# Playbook   : check_zabbix.yml
+# Description: Checks whether Zabbix agent is installed, running, and enabled
+#              on RedHat-family and Ubuntu/Debian-family Linux servers.
+# Compatible : RHEL / CentOS / Rocky / AlmaLinux  +  Ubuntu / Debian
+# Run via    : AWX / Ansible Tower Job Template
+# =============================================================================
+
+- name: Check Zabbix Installation Status
+  hosts: all
+  gather_facts: true          # Required — we use ansible_os_family & ansible_pkg_mgr
+  become: true                # Needed for systemctl and package queries
+
+  vars:
+    # Override these in AWX extra-vars or Survey if your agent name differs
+    zabbix_package_rhel:   "zabbix-agent"     # or "zabbix-agent2"
+    zabbix_package_debian: "zabbix-agent"     # or "zabbix-agent2"
+    zabbix_service_name:   "zabbix-agent"     # or "zabbix-agent2"
+    zabbix_config_rhel:    "/etc/zabbix/zabbix_agentd.conf"
+    zabbix_config_debian:  "/etc/zabbix/zabbix_agentd.conf"
+    zabbix_binary:         "/usr/sbin/zabbix_agentd"   # or zabbix_agent2
+
+  # ---------------------------------------------------------------------------
+  # Initialise result variables so every host has clean defaults
+  # ---------------------------------------------------------------------------
+  pre_tasks:
+    - name: Initialise Zabbix check variables
+      ansible.builtin.set_fact:
+        zabbix_pkg_installed:  false
+        zabbix_pkg_version:    "N/A"
+        zabbix_svc_running:    false
+        zabbix_svc_enabled:    false
+        zabbix_config_exists:  false
+        zabbix_binary_exists:  false
+        zabbix_pkg_name:       "{{ zabbix_package_rhel if ansible_os_family == 'RedHat'
+                                   else zabbix_package_debian }}"
+        zabbix_config_path:    "{{ zabbix_config_rhel if ansible_os_family == 'RedHat'
+                                   else zabbix_config_debian }}"
+
+  # ---------------------------------------------------------------------------
+  # REDHAT FAMILY  (RHEL, CentOS, Rocky, AlmaLinux, Fedora …)
+  # ---------------------------------------------------------------------------
+  tasks:
+
+    # ── Package check (RPM) ──────────────────────────────────────────────────
+    - name: "[RedHat] Query RPM database for Zabbix agent"
+      ansible.builtin.command:
+        cmd: "rpm -q {{ zabbix_pkg_name }}"
+      register: rhel_rpm_result
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == "RedHat"
+
+    - name: "[RedHat] Set package facts"
+      ansible.builtin.set_fact:
+        zabbix_pkg_installed: "{{ rhel_rpm_result.rc == 0 }}"
+        zabbix_pkg_version:   "{{ rhel_rpm_result.stdout | default('N/A') }}"
+      when: ansible_os_family == "RedHat"
+
+    # ── Package check (DEB) ──────────────────────────────────────────────────
+    - name: "[Debian/Ubuntu] Query dpkg for Zabbix agent"
+      ansible.builtin.command:
+        cmd: "dpkg-query -W -f='${Package} ${Version} ${Status}' {{ zabbix_pkg_name }}"
+      register: deb_dpkg_result
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == "Debian"
+
+    - name: "[Debian/Ubuntu] Set package facts"
+      ansible.builtin.set_fact:
+        zabbix_pkg_installed: "{{ deb_dpkg_result.rc == 0 and
+                                  'install ok installed' in deb_dpkg_result.stdout }}"
+        zabbix_pkg_version:   "{{ deb_dpkg_result.stdout | default('N/A') }}"
+      when: ansible_os_family == "Debian"
+
+    # ── Service check (both families via systemd) ────────────────────────────
+    - name: "Check Zabbix agent service status"
+      ansible.builtin.systemd:
+        name: "{{ zabbix_service_name }}"
+      register: zabbix_svc_result
+      failed_when: false
+      when: zabbix_pkg_installed
+
+    - name: "Set service facts"
+      ansible.builtin.set_fact:
+        zabbix_svc_running: "{{ zabbix_svc_result.status.ActiveState | default('') == 'active' }}"
+        zabbix_svc_enabled: "{{ zabbix_svc_result.status.UnitFileState | default('') == 'enabled' }}"
+      when: zabbix_pkg_installed
+
+    # ── Config file check ────────────────────────────────────────────────────
+    - name: "Check Zabbix config file exists"
+      ansible.builtin.stat:
+        path: "{{ zabbix_config_path }}"
+      register: zabbix_cfg_stat
+      when: zabbix_pkg_installed
+
+    - name: "Set config fact"
+      ansible.builtin.set_fact:
+        zabbix_config_exists: "{{ zabbix_cfg_stat.stat.exists | default(false) }}"
+      when: zabbix_pkg_installed
+
+    # ── Binary check ─────────────────────────────────────────────────────────
+    - name: "Check Zabbix agent binary exists"
+      ansible.builtin.stat:
+        path: "{{ zabbix_binary }}"
+      register: zabbix_bin_stat
+
+    - name: "Set binary fact"
+      ansible.builtin.set_fact:
+        zabbix_binary_exists: "{{ zabbix_bin_stat.stat.exists | default(false) }}"
+
+    # ── Zabbix agent version string (when binary present) ────────────────────
+    - name: "Get Zabbix agent version string"
+      ansible.builtin.command:
+        cmd: "{{ zabbix_binary }} --version"
+      register: zabbix_version_output
+      changed_when: false
+      failed_when: false
+      when: zabbix_binary_exists
+
+    # ── Summarise & display results ──────────────────────────────────────────
+    - name: "Display Zabbix check summary"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          HOST            : {{ inventory_hostname }}
+          OS Family       : {{ ansible_os_family }}
+          Distribution    : {{ ansible_distribution }} {{ ansible_distribution_version }}
+          ------------------------------------------------------------
+          Package Name    : {{ zabbix_pkg_name }}
+          Installed       : {{ zabbix_pkg_installed }}
+          Package Version : {{ zabbix_pkg_version }}
+          Binary Present  : {{ zabbix_binary_exists }}
+          Binary Version  : {{ zabbix_version_output.stdout_lines[0] | default('N/A') }}
+          Config Exists   : {{ zabbix_config_exists }}  ({{ zabbix_config_path }})
+          Service Running : {{ zabbix_svc_running }}
+          Service Enabled : {{ zabbix_svc_enabled }}
+          ============================================================
+
+    # ── Build per-host summary dict for the final report ────────────────────
+    - name: "Store result in a host fact"
+      ansible.builtin.set_fact:
+        zabbix_check_result:
+          host:            "{{ inventory_hostname }}"
+          os_family:       "{{ ansible_os_family }}"
+          distro:          "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+          pkg_installed:   "{{ zabbix_pkg_installed }}"
+          pkg_version:     "{{ zabbix_pkg_version }}"
+          binary_present:  "{{ zabbix_binary_exists }}"
+          svc_running:     "{{ zabbix_svc_running }}"
+          svc_enabled:     "{{ zabbix_svc_enabled }}"
+          config_exists:   "{{ zabbix_config_exists }}"
+
+  # ---------------------------------------------------------------------------
+  # POST-PLAY  – consolidated report on the AWX control node
+  # ---------------------------------------------------------------------------
+  post_tasks:
+
+    - name: "Flag servers where Zabbix is NOT installed"
+      ansible.builtin.debug:
+        msg: >-
+          ⚠️  WARNING: Zabbix agent is NOT installed on {{ inventory_hostname }}
+          ({{ ansible_distribution }} {{ ansible_distribution_version }})
+      when: not zabbix_pkg_installed
+
+    - name: "Flag servers where Zabbix service is NOT running"
+      ansible.builtin.debug:
+        msg: >-
+          ⚠️  WARNING: Zabbix agent is installed but NOT RUNNING on {{ inventory_hostname }}
+      when:
+        - zabbix_pkg_installed
+        - not zabbix_svc_running
+
+    - name: "Flag servers where Zabbix service is NOT enabled (won't survive reboot)"
+      ansible.builtin.debug:
+        msg: >-
+          ⚠️  WARNING: Zabbix agent is installed but NOT ENABLED on {{ inventory_hostname }}
+      when:
+        - zabbix_pkg_installed
+        - not zabbix_svc_enabled
+
+    - name: "Confirm healthy Zabbix installations"
+      ansible.builtin.debug:
+        msg: >-
+          ✅  OK: Zabbix agent is installed, running, and enabled on {{ inventory_hostname }}
+      when:
+        - zabbix_pkg_installed
+        - zabbix_svc_running
+        - zabbix_svc_enabled
