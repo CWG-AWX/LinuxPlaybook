@@ -1,0 +1,44 @@
+---
+- name: Check if Zabbix is installed on Linux servers
+  hosts: all
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Check for installed Zabbix packages (RPM-based systems)
+      ansible.builtin.shell: |
+        rpm -qa | grep -i '^zabbix' || true
+      register: zabbix_rpm
+      changed_when: false
+      failed_when: false
+
+    - name: Check for installed Zabbix packages (DEB-based systems)
+      ansible.builtin.shell: |
+        dpkg -l | awk '{print $2}' | grep -i '^zabbix' || true
+      register: zabbix_deb
+      changed_when: false
+      failed_when: false
+
+    - name: Determine if Zabbix is installed
+      ansible.builtin.set_fact:
+        zabbix_installed: >-
+          {{
+            (zabbix_rpm.stdout | trim | length > 0) or
+            (zabbix_deb.stdout | trim | length > 0)
+          }}
+
+    - name: Display Zabbix installation status
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            inventory_hostname ~ ': Zabbix is ' ~
+            ('INSTALLED' if zabbix_installed else 'NOT INSTALLED')
+          }}
+
+    - name: Display installed Zabbix packages
+      ansible.builtin.debug:
+        msg: |
+          Installed Zabbix packages:
+          {{ zabbix_rpm.stdout }}
+          {{ zabbix_deb.stdout }}
+      when: zabbix_installed
