@@ -1,44 +1,58 @@
 ---
-- name: Check if Zabbix is installed on Linux servers
+- name: Check if Zabbix Agent is installed on Linux servers
   hosts: all
-  gather_facts: false
-  become: true
+  gather_facts: yes
+  become: yes
 
   tasks:
-    - name: Check for installed Zabbix packages (RPM-based systems)
-      ansible.builtin.shell: |
-        rpm -qa | grep -i '^zabbix' || true
+    - name: Check if zabbix-agent package is installed (RPM-based systems)
+      shell: |
+        rpm -q zabbix-agent zabbix-agent2 2>/dev/null
       register: zabbix_rpm
-      changed_when: false
       failed_when: false
-
-    - name: Check for installed Zabbix packages (DEB-based systems)
-      ansible.builtin.shell: |
-        dpkg -l | awk '{print $2}' | grep -i '^zabbix' || true
-      register: zabbix_deb
       changed_when: false
-      failed_when: false
+      when: ansible_os_family in ['RedHat', 'Rocky', 'AlmaLinux', 'OracleLinux', 'Suse']
 
-    - name: Determine if Zabbix is installed
-      ansible.builtin.set_fact:
+    - name: Check if zabbix-agent package is installed (Debian-based systems)
+      shell: |
+        dpkg -l | egrep '^ii\s+(zabbix-agent|zabbix-agent2)\s'
+      register: zabbix_dpkg
+      failed_when: false
+      changed_when: false
+      when: ansible_os_family == 'Debian'
+
+    - name: Determine whether Zabbix is installed
+      set_fact:
         zabbix_installed: >-
           {{
-            (zabbix_rpm.stdout | trim | length > 0) or
-            (zabbix_deb.stdout | trim | length > 0)
+            (zabbix_rpm is defined and zabbix_rpm.rc == 0) or
+            (zabbix_dpkg is defined and zabbix_dpkg.rc == 0)
           }}
 
-    - name: Display Zabbix installation status
-      ansible.builtin.debug:
+    - name: Show status for each host
+      debug:
         msg: >-
-          {{
-            inventory_hostname ~ ': Zabbix is ' ~
-            ('INSTALLED' if zabbix_installed else 'NOT INSTALLED')
-          }}
+          Host {{ ansible_hostname }}:
+          {{ 'Zabbix is installed' if zabbix_installed else 'Zabbix is NOT installed' }}
 
-    - name: Display installed Zabbix packages
-      ansible.builtin.debug:
+    - name: Add hosts without Zabbix to a dynamic group
+      group_by:
+        key: no_zabbix
+      when: not zabbix_installed
+
+- name: Report hosts without Zabbix installed
+  hosts: localhost
+  gather_facts: no
+
+  tasks:
+    - name: Display hostnames missing Zabbix
+      debug:
         msg: |
-          Installed Zabbix packages:
-          {{ zabbix_rpm.stdout }}
-          {{ zabbix_deb.stdout }}
-      when: zabbix_installed
+          Hosts without Zabbix installed:
+          {% if groups['no_zabbix'] is defined %}
+          {% for host in groups['no_zabbix'] %}
+          - {{ host }}
+          {% endfor %}
+          {% else %}
+          All servers have Zabbix installed.
+          {% endif %}
