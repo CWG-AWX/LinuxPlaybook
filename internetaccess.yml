@@ -1,0 +1,68 @@
+---
+- name: Check Internet Connectivity on Linux Hosts
+  hosts: all
+  gather_facts: no
+  become: no
+
+  vars:
+    # Public IPs that usually respond to ping
+    internet_test_hosts:
+      - 8.8.8.8        # Google DNS
+      - 1.1.1.1        # Cloudflare DNS
+
+    # URLs to test HTTP/HTTPS connectivity
+    internet_test_urls:
+      - https://www.google.com
+      - https://www.cloudflare.com
+
+  tasks:
+
+    - name: Check ICMP connectivity to public IPs
+      ansible.builtin.command: "ping -c 2 -W 3 {{ item }}"
+      loop: "{{ internet_test_hosts }}"
+      register: ping_results
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Display ping results
+      ansible.builtin.debug:
+        msg: |
+          Host: {{ inventory_hostname }}
+          Target: {{ item.item }}
+          Status: {{ 'Reachable' if item.rc == 0 else 'Unreachable' }}
+      loop: "{{ ping_results.results }}"
+
+    - name: Check HTTPS connectivity to public websites
+      ansible.builtin.uri:
+        url: "{{ item }}"
+        method: GET
+        timeout: 10
+        validate_certs: yes
+        status_code: 200
+      loop: "{{ internet_test_urls }}"
+      register: uri_results
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Display HTTP/HTTPS results
+      ansible.builtin.debug:
+        msg: |
+          Host: {{ inventory_hostname }}
+          URL: {{ item.item }}
+          Status: {{ 'Accessible' if item.status is defined and item.status == 200 else 'Not Accessible' }}
+      loop: "{{ uri_results.results }}"
+
+    - name: Determine overall internet access status
+      ansible.builtin.set_fact:
+        internet_access: >-
+          {{
+            (ping_results.results | selectattr('rc', 'equalto', 0) | list | length > 0)
+            and
+            (uri_results.results | selectattr('status', 'defined') | selectattr('status', 'equalto', 200) | list | length > 0)
+          }}
+
+    - name: Show final internet access result
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}:
+          {{ 'Internet Access Available ✅' if internet_access else 'No Internet Access ❌' }}
