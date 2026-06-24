@@ -1,0 +1,16 @@
+---
+- name: Verify Outbound Connectivity to Checkmk Server (Port 8000)
+  hosts: all
+  gather_facts: no
+  vars:
+    # Set your Checkmk Server IP here (or pass it via AWX Extra Variables)
+    checkmk_server_ip: "192.168.184.60" 
+    checkmk_port: 8000
+ 
+  tasks:
+    - name: Test connectivity from host to Checkmk server port
+      ansible.builtin.wait_for:
+        host: "{{ checkmk_server_ip }}"
+        port: "{{ checkmk_port }}"
+        state: started
+        timeout: 5  # Fails fast within 5 seconds if a firewall is blocking it
