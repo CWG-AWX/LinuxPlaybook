@@ -1,0 +1,21 @@
+---
+- name: Get Windows OS Install Date and Caption
+  hosts: windows
+  gather_facts: no
+
+  tasks:
+    - name: Get OS Install Date and Caption
+      ansible.windows.win_powershell:
+        script: |
+          $os = Get-CimInstance Win32_OperatingSystem
+
+          [PSCustomObject]@{
+              ComputerName = $env:COMPUTERNAME
+              OperatingSystem = $os.Caption
+              InstallDate = $os.InstallDate
+          }
+      register: os_info
+
+    - name: Display results
+      ansible.builtin.debug:
+        var: os_info.output
