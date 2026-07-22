@@ -1,6 +1,6 @@
 ---
 - name: Get Windows OS Install Date and Caption
-  hosts: windows
+  hosts: all
   gather_facts: no
 
   tasks:
