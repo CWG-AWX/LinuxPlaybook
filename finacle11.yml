@@ -1,0 +1,145 @@
+---
+- name: Finacle 11 Service Management
+  hosts: all
+  gather_facts: false
+  vars:
+    # Service Catalog Dictionary
+    finacle_catalog:
+      cohttp:
+        user: finapp
+        path: /ALPHAMG_BE/ALPHAMG/BackEnd/Finacle/FC/app/services/cohttp/bin
+        start_cmd: ./start-cohttpALPHAMG
+        stop_cmd: ./stop-cohttpALPHAMG
+        pid_file: LimoIsUp_cohttp_ALPHAMG_FINACLE-TRAINING.pid
+      comrpt:
+        user: finapp
+        path: /ALPHAMG_BE/ALPHAMG/BackEnd/comnclnt/FINRPT/services/finrptsrvr/bin
+        start_cmd: ./start-finrptsrvrALPHAMG
+        stop_cmd: ./stop-finrptsrvrALPHAMG
+        pid_file: LimoIsUp_finrptsrvrCOM_ALPHAMG_FINCOREAPP-PROD.pid
+      finlstclnt:
+        user: finapp
+        path: /ALPHAMG_BE/ALPHAMG/BackEnd/finlstclnt/FINRPT/services/finrptsrvr/bin
+        start_cmd: ./start-finrptsrvrALPHAMG
+        stop_cmd: ./stop-finrptsrvrALPHAMG
+        pid_file: LimoIsUp_finrptsrvr_ALPHAMG_FINCOREAPP-PROD.pid
+      finrptsrvr:
+        user: finapp
+        path: /ALPHAMG_BE/ALPHAMG/BackEnd/comnclnt/FINRPT/services/finrptsrvr/bin
+        start_cmd: ./start-finrptsrvrALPHAMG
+        stop_cmd: ./stop-finrptsrvrALPHAMG
+        pid_file: LimoIsUp_finrptsrvrCOM_ALPHAMG_FINCOREAPP-PROD.pid
+      aabal:
+        user: finapp
+        path: /ALPHAMG_BE/ALPHAMG/BackEnd/Finacle/FC/app/services/aabal/bin
+        start_cmd: ./start-aabalALPHAMG
+        stop_cmd: ./stop-aabalALPHAMG
+        pid_file: LimoIsUp_aabal_ALPHAMG_FINACLE-TRAINING.pid
+      cif:
+        user: finapp
+        path: /ALPHAMG_CDH/CIF-EXPLORER/cif
+        start_cmd: ./start.sh
+        stop_cmd: ./stop.sh
+        pid_file: ""
+      jboss:
+        user: finapp
+        path: /ALPHAMG_FE/FINACLE_SOFT/jboss-eap-7.4/bin
+        start_cmd: nohup ./startJbossStandalone.sh >start.out &
+        stop_cmd: ./jboss-cli.sh -c --controller=192.168.122.99:11061 command=shutdown
+        pid_file: ""
+
+  tasks:
+    - name: Build target list of services to process
+      ansible.builtin.set_fact:
+        active_services: "{{ finacle_catalog.keys() | list if target_service == 'all' else [target_service] }}"
+
+    # -------------------------------------------------------------------
+    # ACTION: STOP
+    # -------------------------------------------------------------------
+    - name: Execute STOP command for active services
+      when: target_action in ['stop', 'restart']
+      block:
+        - name: Run service stop script
+          ansible.builtin.shell: "{{ finacle_catalog[item].stop_cmd }}"
+          args:
+            chdir: "{{ finacle_catalog[item].path }}"
+          become: true
+          become_user: "{{ finacle_catalog[item].user }}"
+          become_flags: '-i'
+          loop: "{{ active_services }}"
+          failed_when: false
+
+    # -------------------------------------------------------------------
+    # ACTION: START
+    # -------------------------------------------------------------------
+    - name: Execute START command for active services
+      when: target_action in ['start', 'restart']
+      block:
+        - name: Pause before restart (if applicable)
+          ansible.builtin.pause:
+            seconds: 5
+          when: target_action == 'restart'
+
+        - name: Run service start script
+          ansible.builtin.shell: "{{ finacle_catalog[item].start_cmd }}"
+          args:
+            chdir: "{{ finacle_catalog[item].path }}"
+          become: true
+          become_user: "{{ finacle_catalog[item].user }}"
+          become_flags: '-i'
+          loop: "{{ active_services }}"
+          failed_when: false
+
+        - name: Allow services 5 seconds to spawn and write PID files
+          ansible.builtin.pause:
+            seconds: 5
+
+    # -------------------------------------------------------------------
+    # FINAL POST-ACTION STATUS VERIFICATION DASHBOARD
+    # -------------------------------------------------------------------
+    - name: Inspect process and PID status post-execution
+      ansible.builtin.shell: |
+        PID_FILE="{{ finacle_catalog[item].path }}/{{ finacle_catalog[item].pid_file }}"
+        PID_FILENAME="{{ finacle_catalog[item].pid_file }}"
+        
+        if [ -n "$PID_FILENAME" ] && [ -f "$PID_FILE" ]; then
+          PID=$(cat "$PID_FILE" 2>/dev/null | tr -d '\r\n')
+          if [ -n "$PID" ] && ps -p "$PID" > /dev/null 2>&1; then
+            echo "RUNNING|PID: $PID"
+          else
+            echo "STALE_PID|PID file exists (PID: $PID), but process is dead in OS"
+          fi
+        else
+          SERVICE_NAME="{{ item }}"
+          if [ "$SERVICE_NAME" = "jboss" ]; then
+            if pgrep -f "jboss-eap" > /dev/null 2>&1; then
+              echo "RUNNING|JBoss standalone process active"
+            else
+              echo "STOPPED|JBoss process not detected"
+            fi
+          elif [ "$SERVICE_NAME" = "cif" ]; then
+            if pgrep -f "CIF-EXPLORER" > /dev/null 2>&1; then
+              echo "RUNNING|CIF Explorer process active"
+            else
+              echo "STOPPED|CIF Explorer process not detected"
+            fi
+          else
+            echo "STOPPED|No PID file configured or present"
+          fi
+        fi
+      loop: "{{ active_services }}"
+      register: status_raw
+      changed_when: false
+      failed_when: false
+
+    - name: Display Final Finacle Service Status Dashboard
+      ansible.builtin.debug:
+        msg: >-
+          {{ "Service: %11s | Status: %-10s | %s" | format(
+            item.item | upper,
+            item.stdout.split('|')[0],
+            item.stdout.split('|')[1]
+          ) }}
+      loop: "{{ status_raw.results }}"
+      loop_control:
+        label: "{{ item.item }}"
