@@ -1,6 +1,6 @@
 ---
 - name: Finacle 10 Service Management
-  hosts: finacle_servers
+  hosts: all
   gather_facts: false
   vars:
     # Service Catalog Dictionary
