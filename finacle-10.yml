@@ -45,7 +45,7 @@
         temp_dir: /finfe/GMDEV/PROFILE/GMDEVPROFILE/wstemp
 
   tasks:
-    # Fixed: Uses inline Jinja expression to evaluate as a native Ansible list
+    # Safely creates a native Ansible list without string evaluation errors
     - name: Build target list of services to process
       ansible.builtin.set_fact:
         active_services: "{{ finacle_catalog.keys() | list if target_service == 'all' else [target_service] }}"
@@ -53,21 +53,40 @@
     # -------------------------------------------------------------------
     # ACTION: CHECK STATUS
     # -------------------------------------------------------------------
-    - name: Check PID status for selected services
+    - name: Inspect service process and PID status
       when: target_action in ['status', 'start', 'stop', 'restart']
-      ansible.builtin.stat:
-        path: "{{ finacle_catalog[item].path }}/{{ finacle_catalog[item].pid_file }}"
+      ansible.builtin.shell: |
+        PID_FILE="{{ finacle_catalog[item].path }}/{{ finacle_catalog[item].pid_file }}"
+        if [ -f "$PID_FILE" ]; then
+          PID=$(cat "$PID_FILE" 2>/dev/null | tr -d '\r\n')
+          if [ -n "$PID" ] && ps -p "$PID" > /dev/null 2>&1; then
+            echo "RUNNING|PID: $PID"
+          else
+            echo "STALE_PID|PID file exists (PID: $PID), but process is dead in OS"
+          fi
+        else
+          echo "STOPPED|No PID file present, service is stopped"
+        fi
       loop: "{{ active_services }}"
-      register: pid_check_results
+      register: status_raw
+      changed_when: false
+      failed_when: false
 
-    - name: Report status results
+    - name: Display Finacle Service Status Dashboard
       when: target_action == 'status'
       ansible.builtin.debug:
-        msg: >-
-          Service '{{ item.item }}' is 
-          {{ 'RUNNING' if item.stat.exists else 'STOPPED' }} 
-          (Path: {{ finacle_catalog[item.item].path }})
-      loop: "{{ pid_check_results.results }}"
+        msg: |
+          ======================================================================
+          FINACLE 10 SERVICE STATUS DASHBOARD
+          ======================================================================
+          {% for res in status_raw.results %}
+          Service   : {{ res.item }}
+          Owner     : {{ finacle_catalog[res.item].user }}
+          Status    : {{ res.stdout.split('|')[0] }}
+          Details   : {{ res.stdout.split('|')[1] }}
+          Path      : {{ finacle_catalog[res.item].path }}
+          ----------------------------------------------------------------------
+          {% endfor %}
 
     # -------------------------------------------------------------------
     # ACTION: STOP
@@ -83,6 +102,7 @@
           become_user: "{{ finacle_catalog[item].user }}"
           become_flags: '-i'
           loop: "{{ active_services }}"
+          failed_when: false  # Ignores errors if service process was already stopped
 
         - name: Clean WAS temp files (WAS service specific)
           ansible.builtin.file:
@@ -94,6 +114,7 @@
             - finacle_catalog[item].clean_temp is defined
             - finacle_catalog[item].clean_temp | bool
           loop: "{{ active_services }}"
+          failed_when: false
 
     # -------------------------------------------------------------------
     # ACTION: START
@@ -114,3 +135,4 @@
           become_user: "{{ finacle_catalog[item].user }}"
           become_flags: '-i'
           loop: "{{ active_services }}"
+          failed_when: false
