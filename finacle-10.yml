@@ -1,0 +1,120 @@
+---
+- name: Finacle 10 Service Management
+  hosts: finacle_servers
+  gather_facts: false
+  vars:
+    # Service Catalog Dictionary
+    finacle_catalog:
+      finlistval:
+        user: finapp
+        path: /finbe/GMDEV/APP/Finacle/FC/app/services/finlistval/bin
+        start_cmd: ./start-finlistvalGMDEV
+        stop_cmd: ./stop-finlistvalGMDEV
+        pid_file: LimoIsUp_finlistval_GMDEV_GREENFINCORSVR.pid
+      coresession:
+        user: finapp
+        path: /finbe/GMDEV/APP/Finacle/FC/app/services/coresession/bin
+        start_cmd: ./stop-coresessionGMDEV
+        stop_cmd: ./stop-coresessionGMDEV
+        pid_file: LimoIsUp_coresession_GMDEV_GREENFINCORSVR.pid
+      cfg:
+        user: finapp
+        path: /finbe/GMDEV/APP/ConfigService/bin
+        start_cmd: ./start
+        stop_cmd: ./stop
+        pid_file: LimoIsUp_1df0059909c35c86f48d03d791ac11dd.pid
+      FINRPT:
+        user: finapp
+        path: /finbe/GMDEV/APP/finlstclnt/FINRPT/services/finrptsrvr/bin
+        start_cmd: ./start-finrptsrvrGMDEV
+        stop_cmd: ./stop-finrptsrvrGMDEV
+        pid_file: LimoIsUp_finrptsrvrGMDEV_GREENFINCORSVR.pid
+      swift:
+        user: finapp
+        path: /finbe/GMDEV/APP/Finacle/FC/app/services/trswift_GM/bin
+        start_cmd: ./start-trswiftGMDEV
+        stop_cmd: ./stop-trswiftGMDEV
+        pid_file: LimoIsUp_trswift_GMDEV_GM_GREENFINCORSVR.pid
+      was:
+        user: wasadm
+        path: /finfe/GMDEV/PROFILE/GMDEVPROFILE/bin
+        start_cmd: ./startServer.sh GMDEVServer
+        stop_cmd: ./stopServer.sh GMDEVServer
+        pid_file: LimoIsUp_1df0059909c35c86f48d03d791ac11dd.pid
+        clean_temp: true
+        temp_dir: /finfe/GMDEV/PROFILE/GMDEVPROFILE/wstemp
+
+  tasks:
+    - name: Build target list of services to process
+      ansible.builtin.set_fact:
+        active_services: >-
+          {% if target_service == 'all' %}
+          {{ finacle_catalog.keys() | list }}
+          {% else %}
+          [ "{{ target_service }}" ]
+          {% endif %}
+
+    # -------------------------------------------------------------------
+    # ACTION: CHECK STATUS
+    # -------------------------------------------------------------------
+    - name: Check PID status for selected services
+      when: target_action in ['status', 'start', 'stop', 'restart']
+      ansible.builtin.stat:
+        path: "{{ finacle_catalog[item].path }}/{{ finacle_catalog[item].pid_file }}"
+      loop: "{{ active_services }}"
+      register: pid_check_results
+
+    - name: Report status results
+      when: target_action == 'status'
+      ansible.builtin.debug:
+        msg: >-
+          Service '{{ item.item }}' is 
+          {{ 'RUNNING' if item.stat.exists else 'STOPPED' }} 
+          (Path: {{ finacle_catalog[item.item].path }})
+      loop: "{{ pid_check_results.results }}"
+
+    # -------------------------------------------------------------------
+    # ACTION: STOP
+    # -------------------------------------------------------------------
+    - name: Execute STOP command for active services
+      when: target_action in ['stop', 'restart']
+      block:
+        - name: Run service stop script
+          ansible.builtin.shell: "{{ finacle_catalog[item].stop_cmd }}"
+          args:
+            chdir: "{{ finacle_catalog[item].path }}"
+          become: true
+          become_user: "{{ finacle_catalog[item].user }}"
+          become_flags: '-i'
+          loop: "{{ active_services }}"
+
+        - name: Clean WAS temp files (WAS service specific)
+          ansible.builtin.file:
+            path: "{{ finacle_catalog[item].temp_dir }}"
+            state: absent
+          become: true
+          become_user: "{{ finacle_catalog[item].user }}"
+          when: 
+            - finacle_catalog[item].clean_temp is defined
+            - finacle_catalog[item].clean_temp | bool
+          loop: "{{ active_services }}"
+
+    # -------------------------------------------------------------------
+    # ACTION: START
+    # -------------------------------------------------------------------
+    - name: Execute START command for active services
+      when: target_action in ['start', 'restart']
+      block:
+        - name: Pause before restart (if applicable)
+          ansible.builtin.pause:
+            seconds: 5
+          when: target_action == 'restart'
+
+        - name: Run service start script
+          ansible.builtin.shell: "{{ finacle_catalog[item].start_cmd }}"
+          args:
+            chdir: "{{ finacle_catalog[item].path }}"
+          become: true
+          become_user: "{{ finacle_catalog[item].user }}"
+          become_flags: '-i'
+          loop: "{{ active_services }}"
