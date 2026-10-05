@@ -123,10 +123,14 @@
       changed_when: false
       failed_when: false
 
-    # Looped debug task prevents AWX UI character limits from truncating long strings
     - name: Display Final Finacle Service Status Dashboard
       ansible.builtin.debug:
-        msg: "Service: {{ item.item | upper | rjust(11) }} | Status: {{ item.stdout.split('|')[0] | ljust(10) }} | {{ item.stdout.split('|')[1] }}"
+        msg: >-
+          {{ "Service: %11s | Status: %-10s | %s" | format(
+            item.item | upper,
+            item.stdout.split('|')[0],
+            item.stdout.split('|')[1]
+          ) }}
       loop: "{{ status_raw.results }}"
       loop_control:
         label: "{{ item.item }}"
