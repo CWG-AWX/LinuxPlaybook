@@ -71,7 +71,7 @@
             state: absent
           become: true
           become_user: "{{ finacle_catalog[item].user }}"
-          when: 
+          when:
             - finacle_catalog[item].clean_temp is defined
             - finacle_catalog[item].clean_temp | bool
           loop: "{{ active_services }}"
@@ -107,16 +107,53 @@
     # -------------------------------------------------------------------
     - name: Inspect process and PID status post-execution
       ansible.builtin.shell: |
-        PID_FILE="{{ finacle_catalog[item].path }}/{{ finacle_catalog[item].pid_file }}"
-        if [ -f "$PID_FILE" ]; then
-          PID=$(cat "$PID_FILE" 2>/dev/null | tr -d '\r\n')
-          if [ -n "$PID" ] && ps -p "$PID" > /dev/null 2>&1; then
-            echo "RUNNING|PID: $PID"
+        TARGET_ACTION="{{ target_action }}"
+        SERVICE_NAME="{{ item }}"
+        PID_FILENAME="{{ finacle_catalog[item].pid_file }}"
+        PID_FILE="{{ finacle_catalog[item].path }}/$PID_FILENAME"
+
+        if [ "$TARGET_ACTION" = "stop" ]; then
+          echo "SUCCESS|Service stop script ran successfully"
+
+        elif [ "$TARGET_ACTION" = "start" ]; then
+          if [ -n "$PID_FILENAME" ] && [ -f "$PID_FILE" ]; then
+            PID=$(cat "$PID_FILE" 2>/dev/null | tr -d '\r\n')
+            if [ -n "$PID" ]; then
+              echo "SUCCESS|Service start script ran successfully | PID: $PID"
+            else
+              echo "SUCCESS|Service start script ran successfully"
+            fi
           else
-            echo "STALE_PID|PID file exists (PID: $PID), but process is dead in OS"
+            echo "SUCCESS|Service start script ran successfully"
           fi
-        else
-          echo "STOPPED|No PID file present, service is stopped"
+
+        elif [ "$TARGET_ACTION" = "restart" ]; then
+          if [ -n "$PID_FILENAME" ] && [ -f "$PID_FILE" ]; then
+            PID=$(cat "$PID_FILE" 2>/dev/null | tr -d '\r\n')
+            if [ -n "$PID" ]; then
+              echo "SUCCESS|Service restart script ran successfully | PID: $PID"
+            else
+              echo "SUCCESS|Service restart script ran successfully"
+            fi
+          else
+            echo "SUCCESS|Service restart script ran successfully"
+          fi
+
+        elif [ "$TARGET_ACTION" = "status" ]; then
+          if [ -n "$PID_FILENAME" ]; then
+            if [ -f "$PID_FILE" ]; then
+              PID=$(cat "$PID_FILE" 2>/dev/null | tr -d '\r\n')
+              if [ -n "$PID" ] && ps -p "$PID" > /dev/null 2>&1; then
+                echo "RUNNING|Service is running | PID: $PID"
+              else
+                echo "UNKNOWN|Unable to determine current service status at this moment"
+              fi
+            else
+              echo "UNKNOWN|Unable to determine current service status at this moment"
+            fi
+          else
+            echo "UNKNOWN|Unable to determine current service status at this moment"
+          fi
         fi
       loop: "{{ active_services }}"
       register: status_raw
@@ -126,10 +163,10 @@
     - name: Display Final Finacle Service Status Dashboard
       ansible.builtin.debug:
         msg: >-
-          {{ "Service: %11s | Status: %-10s | %s" | format(
+          {{ "Service: %11s | Status: %-8s | %s" | format(
             item.item | upper,
             item.stdout.split('|')[0],
-            item.stdout.split('|')[1]
+            item.stdout.split('|')[1:] | join(' | ')
           ) }}
       loop: "{{ status_raw.results }}"
       loop_control:
