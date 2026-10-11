@@ -6,7 +6,7 @@
 
 # ---------------- Play 1: frontends ----------------
 - name: FinEdge | Health - frontends
-  hosts: cwgfinEFEND-AHV 
+  hosts: cwgfinEFEND
   become: true
   gather_facts: false
   vars:
@@ -48,7 +48,7 @@
 
 # ---------------- Play 2: backend host ----------------
 - name: FinEdge | Health - backend services, dependencies, Eureka, Debezium
-  hosts: "{{ target_hosts | default('cwgfinEBEND-AHV ') }}"
+  hosts: "{{ target_hosts | default('cwgfinEBEND') }}"
   become: true
   gather_facts: false
   vars_files:
