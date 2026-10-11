@@ -1,0 +1,174 @@
+---
+# AWX Job Template: "FinEdge - Health Check"
+# Read-only. Nothing is changed. The job turns RED if anything is down, so it is also
+# safe to schedule (e.g. every 15 min) with a notification template.
+# Survey variable (optional):  check_actuator (true/false)
+
+# ---------------- Play 1: frontends ----------------
+- name: FinEdge | Health - frontends
+  hosts: cwgfinEFEND-AHV 
+  become: true
+  gather_facts: false
+  vars:
+    frontend_releases_root: /var/www/finedgeV2/releases
+  tasks:
+    - name: Nginx port 80 open
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 80
+        timeout: 3
+      register: nginx_port
+      ignore_errors: true
+
+    - name: Site answers
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        status_code: [200, 301, 302]
+        follow_redirects: none
+        timeout: 5
+      register: site
+      ignore_errors: true
+
+    - name: Which release is live
+      ansible.builtin.stat:
+        path: "{{ frontend_releases_root }}/current"
+      register: cur
+
+    - name: Report
+      ansible.builtin.debug:
+        msg:
+          - "port 80: {{ 'OPEN' if not (nginx_port.failed | default(false)) else 'CLOSED' }}"
+          - "http check: {{ 'OK' if not (site.failed | default(false)) else 'FAILED' }}"
+          - "live release: {{ (cur.stat.lnk_source | basename) if (cur.stat.islnk | default(false)) else 'NO SYMLINK' }}"
+
+    - name: Fail if the frontend is unhealthy
+      ansible.builtin.fail:
+        msg: "Frontend {{ inventory_hostname }} unhealthy"
+      when: (nginx_port.failed | default(false)) or (site.failed | default(false)) or not (cur.stat.islnk | default(false))
+
+# ---------------- Play 2: backend host ----------------
+- name: FinEdge | Health - backend services, dependencies, Eureka, Debezium
+  hosts: "{{ target_hosts | default('cwgfinEBEND-AHV ') }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - vars/finedge_services.yml
+  vars:
+    check_actuator: true
+  tasks:
+    - name: Supervisor view
+      ansible.builtin.command: supervisorctl status
+      register: sup
+      changed_when: false
+      failed_when: false
+
+    - name: Is each service port listening?
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ item.port }}"
+        timeout: 3
+      register: port_res
+      ignore_errors: true
+      loop: "{{ finedge_services }}"
+      loop_control:
+        label: "{{ item.name }}:{{ item.port }}"
+
+    - name: Actuator health (best effort)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ item.port }}/actuator/health"
+        status_code: [200, 503]
+        timeout: 5
+      register: act
+      ignore_errors: true
+      loop: "{{ finedge_services }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: check_actuator | bool
+
+    - name: Build the service report
+      ansible.builtin.set_fact:
+        lines: "{{ lines | default([]) + [line] }}"
+        bad: "{{ bad | default([]) + ([svc_item.name] if verdict == 'PROBLEM' else []) }}"
+      vars:
+        svc_item: "{{ finedge_services[idx] }}"
+        port_state: "{{ 'DOWN' if (port_res.results[idx].failed | default(false)) else 'UP' }}"
+        sup_state: "{{ (sup.stdout | regex_findall('^' ~ svc_item.name ~ ' +([A-Z]+)', multiline=True) | first) | default('NOT-IN-SUPERVISOR') }}"
+        act_state: "{{ ((act.results[idx].json | default({})).status | default('n/a')) if (check_actuator | bool) else 'skipped' }}"
+        verdict: "{{ 'OK' if (port_state == 'UP' and sup_state == 'RUNNING') else 'PROBLEM' }}"
+        line: "{{ '%-8s' | format(verdict) }} {{ '%-28s' | format(svc_item.name) }} :{{ svc_item.port }}  port={{ port_state }}  supervisor={{ sup_state }}  actuator={{ act_state }}"
+      loop: "{{ range(finedge_services | length) | list }}"
+      loop_control:
+        loop_var: idx
+
+    - name: Services
+      ansible.builtin.debug:
+        msg: "{{ lines }}"
+
+    # ---- dependencies ----
+    - name: Probe dependencies and other servers
+      ansible.builtin.wait_for:
+        host: "{{ item.host }}"
+        port: "{{ item.port }}"
+        timeout: 3
+      register: infra_res
+      ignore_errors: true
+      loop: "{{ infra_endpoints }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Infra report
+      ansible.builtin.set_fact:
+        infra_lines: "{{ infra_lines | default([]) + [iline] }}"
+        infra_bad: "{{ infra_bad | default([]) + ([ep.name] if (infra_res.results[idx].failed | default(false)) else []) }}"
+      vars:
+        ep: "{{ infra_endpoints[idx] }}"
+        iline: "{{ 'DOWN' if (infra_res.results[idx].failed | default(false)) else 'UP  ' }} {{ ep.name }} {{ ep.host }}:{{ ep.port }}"
+      loop: "{{ range(infra_endpoints | length) | list }}"
+      loop_control:
+        loop_var: idx
+
+    - name: Dependencies
+      ansible.builtin.debug:
+        msg: "{{ infra_lines }}"
+
+    # ---- Eureka ----
+    - name: Eureka registrations
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8761/eureka/apps
+        headers:
+          Accept: application/json
+        timeout: 10
+      register: eureka
+      ignore_errors: true
+
+    - name: Eureka report (every instance should be UP)
+      ansible.builtin.debug:
+        msg: "{{ app.name }}: {{ ([app.instance] if app.instance is mapping else app.instance) | map(attribute='status') | list }}"
+      vars:
+        raw_apps: "{{ ((eureka.json | default({})).applications | default({})).application | default([]) }}"
+        apps: "{{ [raw_apps] if raw_apps is mapping else raw_apps }}"
+      loop: "{{ apps }}"
+      loop_control:
+        loop_var: app
+        label: "{{ app.name }}"
+      when: not (eureka.failed | default(false))
+
+    # ---- Debezium CDC ----
+    - name: Debezium connector status
+      ansible.builtin.uri:
+        url: "http://{{ backend_host_ip }}:18083/connectors/license-audit-outbox-connector/status"
+        timeout: 5
+      register: dbz
+      ignore_errors: true
+
+    - name: Debezium report
+      ansible.builtin.debug:
+        msg: >-
+          license-audit-outbox-connector: connector={{ ((dbz.json | default({})).connector | default({})).state | default('unreachable') }}
+          tasks={{ ((dbz.json | default({})).tasks | default([])) | map(attribute='state') | list }}
+
+    # ---- verdict ----
+    - name: Fail the job if any service or dependency is down
+      ansible.builtin.fail:
+        msg: "PROBLEMS  services: {{ bad | default([]) }}  dependencies: {{ infra_bad | default([]) }}"
+      when: (bad | default([]) | length > 0) or (infra_bad | default([]) | length > 0)
