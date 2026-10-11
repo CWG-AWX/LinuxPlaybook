@@ -1,24 +1,49 @@
 ---
 # AWX Job Template: "FinEdge - Health Check"
-# Read-only. Nothing is changed. The job turns RED if anything is down, so it is also
-# safe to schedule (e.g. every 15 min) with a notification template.
-# Survey variable (optional):  check_actuator (true/false)
+# READ-ONLY. Changes nothing. The job turns RED if a backend service or a critical dependency is down,
+# so it is safe to schedule (e.g. every 15 min) with a notification template.
+#
+# What it reports
+#   Backend services  : the Supervisor state of every program (RUNNING / FATAL / BACKOFF / STOPPED ...) + pid + uptime,
+#                       AND whether the service port is listening.
+#   Messaging / cache : Redis, Kafka, (ZooKeeper), Schema Registry, Debezium Kafka Connect via systemctl
+#                       (active? enabled at boot? since when?) + port. Falls back to port-only if there is no systemd unit.
+#   Databases         : PostgreSQL via systemctl + port + pg_isready + databases exist + connection usage + Debezium replication slot.
+#   Frontends         : nginx via systemctl + port + site answers + which release is live.
+#   Tools server      : Jenkins, Kibana, Grafana, Elasticsearch (informational, never turn the job red).
+#   Every host        : uptime, pending-reboot flag, memory, disks over 85% full.
+#
+# Hosts (inventory host or group names; override with extra vars / survey):
+#   frontend_hosts (default cwgfinEFEND)   db_hosts (default finedge_db)   cicd_hosts (default finedge_cicd)
+#   target_hosts   (default cwgfinEBEND)   <- the backend server
+# A group that does not exist in the inventory is skipped with a warning, not an error.
+#
+# Unit names for Redis/Kafka/etc. are GUESSES (several candidates are tried). Find the real ones with:
+#   systemctl list-units --type=service --all | grep -Ei 'redis|kafka|zookeeper|schema|connect|postgres|nginx'
+#   docker ps -a
 
-# ---------------- Play 1: frontends ----------------
+# ======================= Play 1: frontends =======================
 - name: FinEdge | Health - frontends
-  hosts: cwgfinEFEND
+  hosts: "{{ frontend_hosts | default('cwgfinEFEND') }}"
   become: true
   gather_facts: false
   vars:
     frontend_releases_root: /var/www/finedgeV2/releases
+    frontend_infra:
+      - { name: Nginx, units: [nginx], port: 80, critical: true }
   tasks:
-    - name: Nginx port 80 open
-      ansible.builtin.wait_for:
-        host: 127.0.0.1
-        port: 80
-        timeout: 3
-      register: nginx_port
-      ignore_errors: true
+    - name: Listening TCP ports
+      ansible.builtin.command: ss -ltn
+      register: ss
+      changed_when: false
+      failed_when: false
+
+    - name: Probe nginx
+      ansible.builtin.include_tasks: tasks/probe_systemd.yml
+      loop: "{{ frontend_infra }}"
+      loop_control:
+        loop_var: comp
+        label: "{{ comp.name }}"
 
     - name: Site answers
       ansible.builtin.uri:
@@ -34,104 +59,269 @@
         path: "{{ frontend_releases_root }}/current"
       register: cur
 
-    - name: Report
+    - name: Frontend report
       ansible.builtin.debug:
-        msg:
-          - "port 80: {{ 'OPEN' if not (nginx_port.failed | default(false)) else 'CLOSED' }}"
-          - "http check: {{ 'OK' if not (site.failed | default(false)) else 'FAILED' }}"
-          - "live release: {{ (cur.stat.lnk_source | basename) if (cur.stat.islnk | default(false)) else 'NO SYMLINK' }}"
+        msg: "{{ probe_lines + [site_line, release_line] }}"
+      vars:
+        site_line: "{{ '[ UP ] site answers on http://127.0.0.1/' if not (site.failed | default(false)) else '[DOWN] site does NOT answer on http://127.0.0.1/' }}"
+        release_line: "{{ ('[ OK ] live release = ' ~ (cur.stat.lnk_source | basename)) if (cur.stat.islnk | default(false)) else '[DOWN] no release symlink at ' ~ frontend_releases_root ~ '/current' }}"
 
-    - name: Fail if the frontend is unhealthy
-      ansible.builtin.fail:
-        msg: "Frontend {{ inventory_hostname }} unhealthy"
-      when: (nginx_port.failed | default(false)) or (site.failed | default(false)) or not (cur.stat.islnk | default(false))
+    - name: Host basics
+      ansible.builtin.include_tasks: tasks/host_basics.yml
 
-# ---------------- Play 2: backend host ----------------
-- name: FinEdge | Health - backend services, dependencies, Eureka, Debezium
+    - name: Remember problems for the final verdict
+      ansible.builtin.set_fact:
+        host_problems: "{{ (probe_bad | default([])) + (['site does not answer'] if (site.failed | default(false)) else []) + ([] if (cur.stat.islnk | default(false)) else ['no release symlink']) }}"
+
+# ======================= Play 2: database server =======================
+- name: FinEdge | Health - database server
+  hosts: "{{ db_hosts | default('finedge_db') }}"
+  become: true
+  gather_facts: false
+  vars:
+    db_infra:
+      # NOTE: on Ubuntu 'postgresql' is a wrapper unit; the port and pg_isready below are the real proof.
+      - { name: PostgreSQL, units: [postgresql], port: 5432, critical: true }
+    expected_dbs: [finedge, finedge_subscription]
+  tasks:
+    - name: Listening TCP ports
+      ansible.builtin.command: ss -ltn
+      register: ss
+      changed_when: false
+      failed_when: false
+
+    - name: Probe PostgreSQL
+      ansible.builtin.include_tasks: tasks/probe_systemd.yml
+      loop: "{{ db_infra }}"
+      loop_control:
+        loop_var: comp
+        label: "{{ comp.name }}"
+
+    - name: pg_isready
+      ansible.builtin.shell: |
+        if command -v pg_isready >/dev/null 2>&1; then
+          pg_isready -h 127.0.0.1 -p 5432
+        else
+          echo "pg_isready not installed (port check above still applies)"
+        fi
+      register: pg_ready
+      changed_when: false
+      failed_when: false
+
+    - name: Databases that exist
+      ansible.builtin.shell: |
+        sudo -u postgres psql -Atc "SELECT datname FROM pg_database WHERE NOT datistemplate ORDER BY 1" 2>&1
+      register: pg_dbs
+      changed_when: false
+      failed_when: false
+
+    - name: Connection usage
+      ansible.builtin.shell: |
+        sudo -u postgres psql -Atc "SELECT count(*) || ' of ' || current_setting('max_connections') || ' connections in use' FROM pg_stat_activity" 2>&1
+      register: pg_conn
+      changed_when: false
+      failed_when: false
+
+    - name: Replication slots (Debezium uses one)
+      ansible.builtin.shell: |
+        sudo -u postgres psql -Atc "SELECT slot_name || ' | active=' || active || ' | WAL kept back=' || coalesce(pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)), 'n/a') FROM pg_replication_slots" 2>&1
+      register: pg_slots
+      changed_when: false
+      failed_when: false
+
+    - name: Database report
+      ansible.builtin.debug:
+        msg: "{{ probe_lines + extra }}"
+      vars:
+        missing: "{{ expected_dbs | difference(pg_dbs.stdout_lines) if pg_dbs.rc == 0 else [] }}"
+        slot_lines: "{{ pg_slots.stdout_lines if pg_slots.rc == 0 else ['could not read replication slots: ' ~ (pg_slots.stdout | trim)] }}"
+        extra:
+          - "pg_isready: {{ pg_ready.stdout | trim }}"
+          - "databases: {{ pg_dbs.stdout_lines | join(', ') if pg_dbs.rc == 0 else 'could not list (' ~ (pg_dbs.stdout | trim) ~ ')' }}{{ '  MISSING: ' ~ (missing | join(', ')) if missing | length > 0 else '' }}"
+          - "connections: {{ pg_conn.stdout | trim }}   (12 services x HikariCP max 30 can exceed a default limit of 100)"
+          - "replication slots: {{ slot_lines }}"
+          - "{{ 'WARNING: an INACTIVE replication slot makes Postgres keep WAL forever and can fill the disk' if (pg_slots.stdout is search('active=f')) else 'no inactive replication slot' }}"
+
+    - name: Host basics
+      ansible.builtin.include_tasks: tasks/host_basics.yml
+
+    - name: Remember problems for the final verdict
+      ansible.builtin.set_fact:
+        host_problems: "{{ (probe_bad | default([])) + (['missing database: ' ~ (missing | join(', '))] if missing | length > 0 else []) }}"
+      vars:
+        missing: "{{ expected_dbs | difference(pg_dbs.stdout_lines) if pg_dbs.rc == 0 else [] }}"
+
+# ======================= Play 3: CI/CD and monitoring server =======================
+- name: FinEdge | Health - Jenkins, Kibana, Grafana (informational)
+  hosts: "{{ cicd_hosts | default('finedge_cicd') }}"
+  become: true
+  gather_facts: false
+  vars:
+    tool_infra:
+      - { name: Jenkins,        units: [jenkins],                   port: 8080, critical: false }
+      - { name: Kibana,         units: [kibana],                    port: 5602, critical: false }
+      - { name: Grafana,        units: [grafana-server, grafana],   port: 3000, critical: false }
+      - { name: Elasticsearch,  units: [elasticsearch],             port: 9200, critical: false, optional: true }
+  tasks:
+    - name: Listening TCP ports
+      ansible.builtin.command: ss -ltn
+      register: ss
+      changed_when: false
+      failed_when: false
+
+    - name: Probe tools
+      ansible.builtin.include_tasks: tasks/probe_systemd.yml
+      loop: "{{ tool_infra }}"
+      loop_control:
+        loop_var: comp
+        label: "{{ comp.name }}"
+
+    - name: Tools report
+      ansible.builtin.debug:
+        msg: "{{ probe_lines }}"
+
+    - name: Host basics
+      ansible.builtin.include_tasks: tasks/host_basics.yml
+
+# ======================= Play 4: backend server =======================
+- name: FinEdge | Health - backend services (Supervisor), messaging and cache
   hosts: "{{ target_hosts | default('cwgfinEBEND') }}"
   become: true
   gather_facts: false
-  vars_files:
-    - vars/finedge_services.yml
   vars:
-    check_actuator: true
+    # Supervisor program names as they exist in /etc/supervisor/conf.d on the server. Port = the port that service listens on.
+    # subscription-service is NOT here: it has no conf on this server (it runs elsewhere, probably the licence/admin server).
+    backend_services:
+      - { name: service-registry,           port: 8761 }
+      - { name: api-gateway,                port: 8765 }
+      - { name: admin-service,              port: 8080 }
+      - { name: banking-operations-service, port: 8081 }
+      - { name: customer-service,           port: 8082 }
+      - { name: deposit-service,            port: 8083 }
+      - { name: sms-email-service,          port: 8084 }
+      - { name: loan-service,               port: 8085 }
+      - { name: auth-service,               port: 8086 }
+      - { name: placement-service,          port: 8087 }
+      - { name: card-service,               port: 8089 }
+      - { name: audit-query-service,        port: 8090 }
+      - { name: foreign-exchange-service,   port: 8091 }
+
+    local_infra:
+      - { name: Redis,             units: [redis-server, redis],                                   port: 6379,  critical: true }
+      - { name: Kafka,             units: [kafka, confluent-kafka, kafka-server],                  port: 9092,  critical: true }
+      - { name: ZooKeeper,         units: [zookeeper, confluent-zookeeper],                        port: 2181,  critical: false, optional: true }
+      - { name: Schema Registry,   units: [confluent-schema-registry, schema-registry],            port: 18081, critical: true }
+      - { name: Debezium Connect,  units: [confluent-kafka-connect, kafka-connect, connect-distributed, debezium, debezium-connect], port: 18083, critical: true }
+
   tasks:
-    - name: Supervisor view
+    - name: Supervisor status of every program
       ansible.builtin.command: supervisorctl status
       register: sup
       changed_when: false
       failed_when: false
 
-    - name: Is each service port listening?
-      ansible.builtin.wait_for:
-        host: 127.0.0.1
-        port: "{{ item.port }}"
-        timeout: 3
-      register: port_res
-      ignore_errors: true
-      loop: "{{ finedge_services }}"
-      loop_control:
-        label: "{{ item.name }}:{{ item.port }}"
+    - name: Stop if Supervisor cannot be queried
+      ansible.builtin.assert:
+        that: sup.stdout is search('RUNNING|STOPPED|FATAL|BACKOFF|STARTING|EXITED|UNKNOWN')
+        fail_msg: "supervisorctl status gave no program list on {{ inventory_hostname }}: {{ sup.stdout }} {{ sup.stderr }}"
+        quiet: true
 
-    - name: Actuator health (best effort)
-      ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ item.port }}/actuator/health"
-        status_code: [200, 503]
+    - name: Listening TCP ports
+      ansible.builtin.command: ss -ltn
+      register: ss
+      changed_when: false
+      failed_when: false
+
+    # ---------- 1. backend services: Supervisor state + port ----------
+    - name: Service report
+      ansible.builtin.set_fact:
+        svc_lines: "{{ svc_lines | default([]) + [line] }}"
+        svc_up: "{{ svc_up | default([]) + ([svc_item.name] if verdict == 'UP' else []) }}"
+        svc_wait: "{{ svc_wait | default([]) + ([svc_item.name] if verdict == 'STARTING' else []) }}"
+        svc_bad: "{{ svc_bad | default([]) + ([svc_item.name] if verdict == 'DOWN' else []) }}"
+      vars:
+        state: "{{ sup.stdout | regex_findall('^' ~ svc_item.name ~ ' +([A-Z]+)', multiline=True) | first | default('NOT-IN-SUPERVISOR') }}"
+        detail: "{{ sup.stdout | regex_findall('^' ~ svc_item.name ~ ' +[A-Z]+ +(.*)$', multiline=True) | first | default('') }}"
+        port_up: "{{ ss.stdout is search(':' ~ svc_item.port ~ ' ') }}"
+        recent: "{{ detail is search('uptime 0:0[01]:') }}"
+        verdict: "{{ 'UP' if (state == 'RUNNING' and port_up) else ('STARTING' if ((state == 'RUNNING' and recent) or state == 'STARTING') else 'DOWN') }}"
+        tag: "{{ '[ UP ]' if verdict == 'UP' else ('[WAIT]' if verdict == 'STARTING' else '[DOWN]') }}"
+        line: "{{ tag }} {{ svc_item.name }}: {{ state }}{{ ' (' ~ detail ~ ')' if detail else '' }} | port {{ svc_item.port }} {{ 'listening' if port_up else 'NOT listening' }}{{ '  <- RUNNING but not listening: hung, or wrong port in this playbook' if (state == 'RUNNING' and not port_up and verdict == 'DOWN') else '' }}"
+      loop: "{{ backend_services }}"
+      loop_control:
+        loop_var: svc_item
+        label: "{{ svc_item.name }}"
+
+    - name: Backend services
+      ansible.builtin.debug:
+        msg: "{{ ['SUMMARY: ' ~ (svc_up | default([]) | length) ~ ' of ' ~ (backend_services | length) ~ ' services UP | starting: ' ~ (svc_wait | default([]) | join(', ') or 'none') ~ ' | DOWN: ' ~ (svc_bad | default([]) | join(', ') or 'none')] + svc_lines }}"
+
+    - name: Programs in Supervisor that this playbook does not know about
+      ansible.builtin.debug:
+        msg: "Unlisted Supervisor programs (add them to backend_services): {{ extra | join(', ') }}"
+      vars:
+        known: "{{ backend_services | map(attribute='name') | list }}"
+        present: "{{ sup.stdout_lines | map('regex_replace', ' .*$', '') | reject('equalto', '') | list }}"
+        extra: "{{ present | difference(known) }}"
+      when: extra | length > 0
+
+    # ---------- 2. messaging and cache on this host (systemctl) ----------
+    - name: Probe Redis, Kafka, ZooKeeper, Schema Registry, Debezium
+      ansible.builtin.include_tasks: tasks/probe_systemd.yml
+      loop: "{{ local_infra }}"
+      loop_control:
+        loop_var: comp
+        label: "{{ comp.name }}"
+
+    - name: PostgreSQL reachable from this host
+      ansible.builtin.wait_for:
+        host: 172.20.250.9
+        port: 5432
         timeout: 5
-      register: act
+      register: db_reach
       ignore_errors: true
-      loop: "{{ finedge_services }}"
-      loop_control:
-        label: "{{ item.name }}"
-      when: check_actuator | bool
 
-    - name: Build the service report
-      ansible.builtin.set_fact:
-        lines: "{{ lines | default([]) + [line] }}"
-        bad: "{{ bad | default([]) + ([svc_item.name] if verdict == 'PROBLEM' else []) }}"
-      vars:
-        svc_item: "{{ finedge_services[idx] }}"
-        port_state: "{{ 'DOWN' if (port_res.results[idx].failed | default(false)) else 'UP' }}"
-        sup_state: "{{ (sup.stdout | regex_findall('^' ~ svc_item.name ~ ' +([A-Z]+)', multiline=True) | first) | default('NOT-IN-SUPERVISOR') }}"
-        act_state: "{{ ((act.results[idx].json | default({})).status | default('n/a')) if (check_actuator | bool) else 'skipped' }}"
-        verdict: "{{ 'OK' if (port_state == 'UP' and sup_state == 'RUNNING') else 'PROBLEM' }}"
-        line: "{{ '%-8s' | format(verdict) }} {{ '%-28s' | format(svc_item.name) }} :{{ svc_item.port }}  port={{ port_state }}  supervisor={{ sup_state }}  actuator={{ act_state }}"
-      loop: "{{ range(finedge_services | length) | list }}"
-      loop_control:
-        loop_var: idx
-
-    - name: Services
+    - name: Messaging, cache and database reachability
       ansible.builtin.debug:
-        msg: "{{ lines }}"
+        msg: "{{ probe_lines + [db_line] }}"
+      vars:
+        db_line: "{{ '[ UP ] PostgreSQL 172.20.250.9:5432 is reachable from this host' if not (db_reach.failed | default(false)) else '[DOWN] PostgreSQL 172.20.250.9:5432 is NOT reachable from this host' }}"
 
-    # ---- dependencies ----
-    - name: Probe dependencies and other servers
-      ansible.builtin.wait_for:
-        host: "{{ item.host }}"
-        port: "{{ item.port }}"
-        timeout: 3
-      register: infra_res
+    - name: Units that will not come back after a reboot
+      ansible.builtin.debug:
+        msg: "{{ boot_warn }}"
+      when: boot_warn | default([]) | length > 0
+
+    # ---------- 3. does it actually answer? (best effort, informational) ----------
+    - name: Redis PING
+      ansible.builtin.shell: |
+        exec 3<>/dev/tcp/127.0.0.1/6379
+        printf 'PING\r\n' >&3
+        read -t 2 -r reply <&3
+        printf '%s' "$reply"
+      args:
+        executable: /bin/bash
+      register: redis_ping
+      changed_when: false
+      failed_when: false
+      when: ss.stdout is search(':6379 ')
+
+    - name: Schema Registry answers
+      ansible.builtin.uri:
+        url: http://127.0.0.1:18081/subjects
+        timeout: 5
+      register: sr
       ignore_errors: true
-      loop: "{{ infra_endpoints }}"
-      loop_control:
-        label: "{{ item.name }}"
+      when: ss.stdout is search(':18081 ')
 
-    - name: Infra report
-      ansible.builtin.set_fact:
-        infra_lines: "{{ infra_lines | default([]) + [iline] }}"
-        infra_bad: "{{ infra_bad | default([]) + ([ep.name] if (infra_res.results[idx].failed | default(false)) else []) }}"
-      vars:
-        ep: "{{ infra_endpoints[idx] }}"
-        iline: "{{ 'DOWN' if (infra_res.results[idx].failed | default(false)) else 'UP  ' }} {{ ep.name }} {{ ep.host }}:{{ ep.port }}"
-      loop: "{{ range(infra_endpoints | length) | list }}"
-      loop_control:
-        loop_var: idx
+    - name: Debezium connector status
+      ansible.builtin.uri:
+        url: http://127.0.0.1:18083/connectors/license-audit-outbox-connector/status
+        timeout: 5
+      register: dbz
+      ignore_errors: true
+      when: ss.stdout is search(':18083 ')
 
-    - name: Dependencies
-      ansible.builtin.debug:
-        msg: "{{ infra_lines }}"
-
-    # ---- Eureka ----
     - name: Eureka registrations
       ansible.builtin.uri:
         url: http://127.0.0.1:8761/eureka/apps
@@ -140,6 +330,14 @@
         timeout: 10
       register: eureka
       ignore_errors: true
+      when: ss.stdout is search(':8761 ')
+
+    - name: Deeper checks
+      ansible.builtin.debug:
+        msg:
+          - "Redis PING reply: {{ (redis_ping.stdout | default('') | trim) or 'no reply' }}   (+PONG is fine; -NOAUTH also means Redis is alive)"
+          - "Schema Registry /subjects: {{ 'answers' if (sr.status | default(0)) == 200 else 'no answer' }}"
+          - "Debezium license-audit-outbox-connector: connector={{ ((dbz.json | default({})).connector | default({})).state | default('unreachable') }} tasks={{ ((dbz.json | default({})).tasks | default([])) | map(attribute='state') | list }}"
 
     - name: Eureka report (every instance should be UP)
       ansible.builtin.debug:
@@ -151,24 +349,51 @@
       loop_control:
         loop_var: app
         label: "{{ app.name }}"
-      when: not (eureka.failed | default(false))
+      when: eureka.json is defined
 
-    # ---- Debezium CDC ----
-    - name: Debezium connector status
-      ansible.builtin.uri:
-        url: "http://{{ backend_host_ip }}:18083/connectors/license-audit-outbox-connector/status"
-        timeout: 5
-      register: dbz
-      ignore_errors: true
+    # ---------- 4. docker (sandbox containers etc.) ----------
+    - name: Docker containers
+      ansible.builtin.shell: |
+        if command -v docker >/dev/null 2>&1; then
+          docker ps -a --format '{% raw %}{{.Names}} | {{.Status}} | {{.Ports}}{% endraw %}'
+        else
+          echo "docker not installed"
+        fi
+      register: dock
+      changed_when: false
+      failed_when: false
 
-    - name: Debezium report
+    - name: Docker report (sandbox lives here)
       ansible.builtin.debug:
-        msg: >-
-          license-audit-outbox-connector: connector={{ ((dbz.json | default({})).connector | default({})).state | default('unreachable') }}
-          tasks={{ ((dbz.json | default({})).tasks | default([])) | map(attribute='state') | list }}
+        msg: "{{ dock.stdout_lines if dock.stdout_lines | length > 0 else ['no containers'] }}"
 
-    # ---- verdict ----
-    - name: Fail the job if any service or dependency is down
+    - name: Host basics
+      ansible.builtin.include_tasks: tasks/host_basics.yml
+
+    - name: Remember problems for the final verdict
+      ansible.builtin.set_fact:
+        host_problems: "{{ (svc_bad | default([])) + (probe_bad | default([])) + (['PostgreSQL unreachable from this host'] if (db_reach.failed | default(false)) else []) }}"
+
+# ======================= Play 5: verdict =======================
+# Verdict lives in its own play so that one failing host can never stop the other checks from running.
+- name: FinEdge | Health - overall verdict
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Collect problems from every host checked above
+      ansible.builtin.set_fact:
+        all_problems: "{{ all_problems | default([]) + [h ~ ': ' ~ (hostvars[h].host_problems | join(', '))] }}"
+      loop: "{{ hostvars.keys() | list }}"
+      loop_control:
+        loop_var: h
+      when: hostvars[h].host_problems | default([]) | length > 0
+
+    - name: Overall result
+      ansible.builtin.debug:
+        msg: "{{ 'ALL CHECKED SERVICES HEALTHY' if all_problems | default([]) | length == 0 else all_problems }}"
+
+    - name: Fail the job if anything is down
       ansible.builtin.fail:
-        msg: "PROBLEMS  services: {{ bad | default([]) }}  dependencies: {{ infra_bad | default([]) }}"
-      when: (bad | default([]) | length > 0) or (infra_bad | default([]) | length > 0)
+        msg: "UNHEALTHY -> {{ all_problems }}"
+      when: all_problems | default([]) | length > 0
