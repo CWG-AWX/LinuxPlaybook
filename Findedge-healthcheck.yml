@@ -1,22 +1,33 @@
 ---
-# AWX Job Template: "FinEdge - Health Check"
-# READ-ONLY. Changes nothing. The job turns RED if a backend service or a critical dependency is down,
-# so it is safe to schedule (e.g. every 15 min) with a notification template.
+# AWX Job Template: "FinEdge - Health Check"        (SINGLE FILE: copy just this one file into the AWX project)
+# READ-ONLY. Changes nothing on the servers.
+#
+# It NEVER fails the job by default (ignore_errors / ignore_unreachable on every play). The result is the REPORT:
+#   * the job output (lines marked [ UP ] / [WAIT] / [DOWN])
+#   * an Excel file you can download (see "Excel report" below)
+# To make the job turn RED when something critical is down (useful for scheduled runs + notifications):
+#   extra var   fail_on_problems: true
 #
 # What it reports
-#   Backend services  : the Supervisor state of every program (RUNNING / FATAL / BACKOFF / STOPPED ...) + pid + uptime,
-#                       AND whether the service port is listening.
-#   Messaging / cache : Redis, Kafka, (ZooKeeper), Schema Registry, Debezium Kafka Connect via systemctl
-#                       (active? enabled at boot? since when?) + port. Falls back to port-only if there is no systemd unit.
-#   Databases         : PostgreSQL via systemctl + port + pg_isready + databases exist + connection usage + Debezium replication slot.
-#   Frontends         : nginx via systemctl + port + site answers + which release is live.
-#   Tools server      : Jenkins, Kibana, Grafana, Elasticsearch (informational, never turn the job red).
-#   Every host        : uptime, pending-reboot flag, memory, disks over 85% full.
+#   Backend services  : Supervisor state (RUNNING/FATAL/BACKOFF/STOPPED), pid, uptime + whether the service port listens.
+#   Messaging / cache : Redis, Kafka, ZooKeeper, Schema Registry, Debezium Connect via systemctl (+ port).
+#   Database          : PostgreSQL via systemctl, pg_isready, databases exist, connections vs limit, replication slots.
+#   Frontend          : nginx via systemctl, site answers, live release.
+#   Tools server      : Jenkins, Kibana, Grafana, Elasticsearch (informational).
+#   Every host        : uptime, memory, pending reboot, disks >= 85% full.
 #
-# Hosts (inventory host or group names; override with extra vars / survey):
-#   frontend_hosts (default cwgfinEFEND)   db_hosts (default finedge_db)   cicd_hosts (default finedge_cicd)
-#   target_hosts   (default cwgfinEBEND)   <- the backend server
-# A group that does not exist in the inventory is skipped with a warning, not an error.
+# Hosts (inventory host or group names; override with extra vars):
+#   frontend_hosts (cwgfinEFEND)  db_hosts (finedge_db)  cicd_hosts (finedge_cicd)  target_hosts (cwgfinEBEND = backend)
+#   A group that does not exist is skipped with a warning.
+#
+# Excel report
+#   After the checks, one XLSX is built on the "report host" (default: the cicd_hosts host) and saved to
+#     report_dir      default /var/lib/jenkins/userContent/health-reports      (Jenkins serves userContent files)
+#   Download (log in to Jenkins first):
+#     report_url_base default http://172.20.250.6:8080/userContent/health-reports/finedge-health-latest.xlsx
+#   A timestamped copy is kept for report_keep_days (default 14). Needs python3 on the report host.
+#   If there is no report host, the whole table is printed in the job output instead (copy into Excel).
+#   Overrides: report_host, report_dir, report_url_base, report_owner (default jenkins), report_keep_days.
 #
 # Unit names for Redis/Kafka/etc. are GUESSES (several candidates are tried). Find the real ones with:
 #   systemctl list-units --type=service --all | grep -Ei 'redis|kafka|zookeeper|schema|connect|postgres|nginx'
@@ -27,10 +38,23 @@
   hosts: "{{ frontend_hosts | default('cwgfinEFEND') }}"
   become: true
   gather_facts: false
+  ignore_errors: true
+  ignore_unreachable: true
   vars:
     frontend_releases_root: /var/www/finedgeV2/releases
-    frontend_infra:
-      - { name: Nginx, units: [nginx], port: 80, critical: true }
+    infra_components:
+      - { tier: Frontend, name: Nginx, units: [nginx], port: 80, critical: true }
+    hot: |-
+      {% set ns = namespace(h=[]) -%}
+      {% for l in df.stdout_lines[1:] -%}
+      {% set p = l.split() -%}
+      {% if p | length >= 6 and (p[4] | replace('%', '') | int) >= (disk_warn_pct | default(85) | int) -%}
+      {% set ns.h = ns.h + [p[5] ~ ' ' ~ p[4]] -%}
+      {% endif -%}
+      {% endfor -%}
+      {{ ns.h | join(', ') }}
+    reboot_txt: "{{ 'REBOOT REQUIRED (pending updates). After a reboot ALL services cold-start at once: see runbook section D.' if (reboot_req.stat.exists | default(false)) else 'no reboot pending' }}"
+    disk_txt: "{{ ('Filesystems at or above ' ~ (disk_warn_pct | default(85)) ~ '%: ' ~ hot) if hot | length > 0 else ('all filesystems below ' ~ (disk_warn_pct | default(85)) ~ '%') }}"
   tasks:
     - name: Listening TCP ports
       ansible.builtin.command: ss -ltn
@@ -38,12 +62,53 @@
       changed_when: false
       failed_when: false
 
-    - name: Probe nginx
-      ansible.builtin.include_tasks: tasks/probe_systemd.yml
-      loop: "{{ frontend_infra }}"
+    - name: Probe systemd units
+      ansible.builtin.shell: |
+        for u in {{ item.units | join(' ') }}; do
+          if [ "$(systemctl show "$u" -p LoadState --value 2>/dev/null)" = "loaded" ]; then
+            echo "UNIT=$u"
+            echo "ACTIVE=$(systemctl is-active "$u" 2>/dev/null)"
+            echo "SUB=$(systemctl show "$u" -p SubState --value 2>/dev/null)"
+            echo "ENABLED=$(systemctl is-enabled "$u" 2>/dev/null)"
+            echo "SINCE=$(systemctl show "$u" -p ActiveEnterTimestamp --value 2>/dev/null)"
+            exit 0
+          fi
+        done
+        echo "UNIT=none"
+      args:
+        executable: /bin/bash
+      register: probes
+      changed_when: false
+      failed_when: false
+      loop: "{{ infra_components }}"
       loop_control:
-        loop_var: comp
-        label: "{{ comp.name }}"
+        label: "{{ item.name }}"
+
+    - name: Record systemd results
+      ansible.builtin.set_fact:
+        probe_lines: "{{ probe_lines | default([]) + [line] }}"
+        probe_bad: "{{ probe_bad | default([]) + ([comp.name] if (verdict == 'DOWN' and (comp.critical | default(true))) else []) }}"
+        boot_warn: "{{ boot_warn | default([]) + ([comp.name ~ ' (' ~ unit ~ ') is ' ~ enabled ~ ', so it will NOT start by itself after a reboot'] if (unit != 'none' and enabled != 'enabled') else []) }}"
+        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, comp.tier | default('Service'), comp.name, verdict, detail ~ note]] }}"
+      vars:
+        comp: "{{ infra_components[idx] }}"
+        out: "{{ probes.results[idx].stdout | default('UNIT=none') }}"
+        unit: "{{ out | regex_findall('UNIT=([A-Za-z0-9@._:-]+)') | first | default('none') }}"
+        active: "{{ out | regex_findall('ACTIVE=([a-z-]+)') | first | default('unknown') }}"
+        sub: "{{ out | regex_findall('SUB=([a-z-]+)') | first | default('?') }}"
+        enabled: "{{ out | regex_findall('ENABLED=([a-z-]+)') | first | default('unknown') }}"
+        since: "{{ out | regex_findall('SINCE=(.*)') | first | default('') }}"
+        port_up: "{{ ss.stdout is search(':' ~ comp.port ~ ' ') }}"
+        verdict: "{{ 'UP' if ((unit != 'none' and active == 'active' and port_up) or (unit == 'none' and port_up)) else ('ABSENT' if (unit == 'none' and (comp.optional | default(false))) else 'DOWN') }}"
+        tag: "{{ '[ UP ]' if verdict == 'UP' else ('[ -- ]' if verdict == 'ABSENT' else '[DOWN]') }}"
+        port_txt: "{{ 'port ' ~ comp.port ~ (' listening' if port_up else ' NOT listening') }}"
+        detail: "{{ ('systemd ' ~ unit ~ ' is ' ~ active ~ ' (' ~ sub ~ '), enabled=' ~ enabled ~ (', since ' ~ since if since else '') ~ '; ' ~ port_txt) if unit != 'none' else ('no systemd unit found (tried ' ~ (comp.units | join(', ')) ~ '); ' ~ port_txt ~ (' - running outside systemd (Docker or manual?)' if port_up else '')) }}"
+        note: "{{ '  (non-critical)' if (verdict == 'DOWN' and not (comp.critical | default(true))) else ('  (not present, fine if unused)' if verdict == 'ABSENT' else '') }}"
+        line: "{{ tag }} {{ comp.name }}: {{ detail }}{{ note }}"
+      loop: "{{ range(infra_components | length) | list }}"
+      loop_control:
+        loop_var: idx
+        label: "{{ infra_components[idx].name }}"
 
     - name: Site answers
       ansible.builtin.uri:
@@ -61,28 +126,76 @@
 
     - name: Frontend report
       ansible.builtin.debug:
-        msg: "{{ probe_lines + [site_line, release_line] }}"
+        msg: "{{ probe_lines | default([]) + [site_line, release_line] }}"
       vars:
         site_line: "{{ '[ UP ] site answers on http://127.0.0.1/' if not (site.failed | default(false)) else '[DOWN] site does NOT answer on http://127.0.0.1/' }}"
         release_line: "{{ ('[ OK ] live release = ' ~ (cur.stat.lnk_source | basename)) if (cur.stat.islnk | default(false)) else '[DOWN] no release symlink at ' ~ frontend_releases_root ~ '/current' }}"
 
-    - name: Host basics
-      ansible.builtin.include_tasks: tasks/host_basics.yml
-
-    - name: Remember problems for the final verdict
+    - name: Record frontend results
       ansible.builtin.set_fact:
-        host_problems: "{{ (probe_bad | default([])) + (['site does not answer'] if (site.failed | default(false)) else []) + ([] if (cur.stat.islnk | default(false)) else ['no release symlink']) }}"
+        host_problems: "{{ (probe_bad | default([])) + (['site does not answer'] if site_bad else []) + (['no release symlink'] if not has_link else []) }}"
+        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, 'Frontend', 'Site answers', ('DOWN' if site_bad else 'UP'), 'http://127.0.0.1/'], [inventory_hostname, 'Frontend', 'Live release', ('OK' if has_link else 'DOWN'), (cur.stat.lnk_source | basename) if has_link else 'no release symlink']] }}"
+      vars:
+        site_bad: "{{ site.failed | default(false) }}"
+        has_link: "{{ cur.stat.islnk | default(false) }}"
+
+    - name: Uptime
+      ansible.builtin.command: uptime -p
+      register: up_p
+      changed_when: false
+      failed_when: false
+
+    - name: Pending reboot flag (the "System restart required" banner)
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_req
+
+    - name: Memory
+      ansible.builtin.shell: free -m | awk 'NR==2{print $3"/"$2" MB used"}'
+      register: mem
+      changed_when: false
+      failed_when: false
+
+    - name: Filesystems
+      ansible.builtin.command: df -P -x tmpfs -x devtmpfs -x squashfs -x overlay
+      register: df
+      changed_when: false
+      failed_when: false
+
+    - name: Host basics
+      ansible.builtin.debug:
+        msg:
+          - "{{ inventory_hostname }}: {{ up_p.stdout | default('uptime n/a') }} | memory {{ mem.stdout | default('n/a') }}"
+          - "{{ reboot_txt }}"
+          - "{{ disk_txt }}"
+
+    - name: Record host basics
+      ansible.builtin.set_fact:
+        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, 'Host', 'Uptime / memory', 'INFO', (up_p.stdout | default('n/a')) ~ ' | memory ' ~ (mem.stdout | default('n/a'))], [inventory_hostname, 'Host', 'Reboot pending', ('WARN' if (reboot_req.stat.exists | default(false)) else 'OK'), reboot_txt], [inventory_hostname, 'Host', 'Disk usage', ('WARN' if hot | length > 0 else 'OK'), disk_txt]] }}"
 
 # ======================= Play 2: database server =======================
 - name: FinEdge | Health - database server
-  hosts: "{{ db_hosts | default('finedge_db') }}"
+  hosts: "{{ db_hosts | default('finedge3DB') }}"
   become: true
   gather_facts: false
+  ignore_errors: true
+  ignore_unreachable: true
   vars:
-    db_infra:
-      # NOTE: on Ubuntu 'postgresql' is a wrapper unit; the port and pg_isready below are the real proof.
-      - { name: PostgreSQL, units: [postgresql], port: 5432, critical: true }
+    infra_components:
+      # On Ubuntu 'postgresql' is a wrapper unit; the port and pg_isready below are the real proof.
+      - { tier: Database, name: PostgreSQL, units: [postgresql], port: 5432, critical: true }
     expected_dbs: [finedge, finedge_subscription]
+    hot: |-
+      {% set ns = namespace(h=[]) -%}
+      {% for l in df.stdout_lines[1:] -%}
+      {% set p = l.split() -%}
+      {% if p | length >= 6 and (p[4] | replace('%', '') | int) >= (disk_warn_pct | default(85) | int) -%}
+      {% set ns.h = ns.h + [p[5] ~ ' ' ~ p[4]] -%}
+      {% endif -%}
+      {% endfor -%}
+      {{ ns.h | join(', ') }}
+    reboot_txt: "{{ 'REBOOT REQUIRED (pending updates). After a reboot ALL services cold-start at once: see runbook section D.' if (reboot_req.stat.exists | default(false)) else 'no reboot pending' }}"
+    disk_txt: "{{ ('Filesystems at or above ' ~ (disk_warn_pct | default(85)) ~ '%: ' ~ hot) if hot | length > 0 else ('all filesystems below ' ~ (disk_warn_pct | default(85)) ~ '%') }}"
   tasks:
     - name: Listening TCP ports
       ansible.builtin.command: ss -ltn
@@ -90,12 +203,53 @@
       changed_when: false
       failed_when: false
 
-    - name: Probe PostgreSQL
-      ansible.builtin.include_tasks: tasks/probe_systemd.yml
-      loop: "{{ db_infra }}"
+    - name: Probe systemd units
+      ansible.builtin.shell: |
+        for u in {{ item.units | join(' ') }}; do
+          if [ "$(systemctl show "$u" -p LoadState --value 2>/dev/null)" = "loaded" ]; then
+            echo "UNIT=$u"
+            echo "ACTIVE=$(systemctl is-active "$u" 2>/dev/null)"
+            echo "SUB=$(systemctl show "$u" -p SubState --value 2>/dev/null)"
+            echo "ENABLED=$(systemctl is-enabled "$u" 2>/dev/null)"
+            echo "SINCE=$(systemctl show "$u" -p ActiveEnterTimestamp --value 2>/dev/null)"
+            exit 0
+          fi
+        done
+        echo "UNIT=none"
+      args:
+        executable: /bin/bash
+      register: probes
+      changed_when: false
+      failed_when: false
+      loop: "{{ infra_components }}"
       loop_control:
-        loop_var: comp
-        label: "{{ comp.name }}"
+        label: "{{ item.name }}"
+
+    - name: Record systemd results
+      ansible.builtin.set_fact:
+        probe_lines: "{{ probe_lines | default([]) + [line] }}"
+        probe_bad: "{{ probe_bad | default([]) + ([comp.name] if (verdict == 'DOWN' and (comp.critical | default(true))) else []) }}"
+        boot_warn: "{{ boot_warn | default([]) + ([comp.name ~ ' (' ~ unit ~ ') is ' ~ enabled ~ ', so it will NOT start by itself after a reboot'] if (unit != 'none' and enabled != 'enabled') else []) }}"
+        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, comp.tier | default('Service'), comp.name, verdict, detail ~ note]] }}"
+      vars:
+        comp: "{{ infra_components[idx] }}"
+        out: "{{ probes.results[idx].stdout | default('UNIT=none') }}"
+        unit: "{{ out | regex_findall('UNIT=([A-Za-z0-9@._:-]+)') | first | default('none') }}"
+        active: "{{ out | regex_findall('ACTIVE=([a-z-]+)') | first | default('unknown') }}"
+        sub: "{{ out | regex_findall('SUB=([a-z-]+)') | first | default('?') }}"
+        enabled: "{{ out | regex_findall('ENABLED=([a-z-]+)') | first | default('unknown') }}"
+        since: "{{ out | regex_findall('SINCE=(.*)') | first | default('') }}"
+        port_up: "{{ ss.stdout is search(':' ~ comp.port ~ ' ') }}"
+        verdict: "{{ 'UP' if ((unit != 'none' and active == 'active' and port_up) or (unit == 'none' and port_up)) else ('ABSENT' if (unit == 'none' and (comp.optional | default(false))) else 'DOWN') }}"
+        tag: "{{ '[ UP ]' if verdict == 'UP' else ('[ -- ]' if verdict == 'ABSENT' else '[DOWN]') }}"
+        port_txt: "{{ 'port ' ~ comp.port ~ (' listening' if port_up else ' NOT listening') }}"
+        detail: "{{ ('systemd ' ~ unit ~ ' is ' ~ active ~ ' (' ~ sub ~ '), enabled=' ~ enabled ~ (', since ' ~ since if since else '') ~ '; ' ~ port_txt) if unit != 'none' else ('no systemd unit found (tried ' ~ (comp.units | join(', ')) ~ '); ' ~ port_txt ~ (' - running outside systemd (Docker or manual?)' if port_up else '')) }}"
+        note: "{{ '  (non-critical)' if (verdict == 'DOWN' and not (comp.critical | default(true))) else ('  (not present, fine if unused)' if verdict == 'ABSENT' else '') }}"
+        line: "{{ tag }} {{ comp.name }}: {{ detail }}{{ note }}"
+      loop: "{{ range(infra_components | length) | list }}"
+      loop_control:
+        loop_var: idx
+        label: "{{ infra_components[idx].name }}"
 
     - name: pg_isready
       ansible.builtin.shell: |
@@ -131,7 +285,7 @@
 
     - name: Database report
       ansible.builtin.debug:
-        msg: "{{ probe_lines + extra }}"
+        msg: "{{ probe_lines | default([]) + extra }}"
       vars:
         missing: "{{ expected_dbs | difference(pg_dbs.stdout_lines) if pg_dbs.rc == 0 else [] }}"
         slot_lines: "{{ pg_slots.stdout_lines if pg_slots.rc == 0 else ['could not read replication slots: ' ~ (pg_slots.stdout | trim)] }}"
@@ -142,26 +296,72 @@
           - "replication slots: {{ slot_lines }}"
           - "{{ 'WARNING: an INACTIVE replication slot makes Postgres keep WAL forever and can fill the disk' if (pg_slots.stdout is search('active=f')) else 'no inactive replication slot' }}"
 
-    - name: Host basics
-      ansible.builtin.include_tasks: tasks/host_basics.yml
-
-    - name: Remember problems for the final verdict
+    - name: Record database results
       ansible.builtin.set_fact:
-        host_problems: "{{ (probe_bad | default([])) + (['missing database: ' ~ (missing | join(', '))] if missing | length > 0 else []) }}"
+        host_problems: "{{ (probe_bad | default([])) + (['missing database: ' ~ (missing | join(', '))] if missing | length > 0 else []) + (['pg_isready got no response'] if isready == 'DOWN' else []) }}"
+        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, 'Database', 'pg_isready', isready, pg_ready.stdout | trim], [inventory_hostname, 'Database', 'Databases exist', ('MISSING' if missing | length > 0 else ('OK' if pg_dbs.rc == 0 else 'INFO')), (pg_dbs.stdout_lines | join(', ')) ~ (('  MISSING: ' ~ (missing | join(', '))) if missing | length > 0 else '')], [inventory_hostname, 'Database', 'Connections', 'INFO', pg_conn.stdout | trim], [inventory_hostname, 'Database', 'Replication slots', ('WARN' if (pg_slots.stdout is search('active=f')) else 'OK'), pg_slots.stdout_lines | join(' ;; ') or 'none']] }}"
       vars:
         missing: "{{ expected_dbs | difference(pg_dbs.stdout_lines) if pg_dbs.rc == 0 else [] }}"
+        isready: "{{ 'UP' if (pg_ready.stdout is search('accepting connections')) else ('INFO' if (pg_ready.stdout is search('not installed')) else 'DOWN') }}"
+
+    - name: Uptime
+      ansible.builtin.command: uptime -p
+      register: up_p
+      changed_when: false
+      failed_when: false
+
+    - name: Pending reboot flag (the "System restart required" banner)
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_req
+
+    - name: Memory
+      ansible.builtin.shell: free -m | awk 'NR==2{print $3"/"$2" MB used"}'
+      register: mem
+      changed_when: false
+      failed_when: false
+
+    - name: Filesystems
+      ansible.builtin.command: df -P -x tmpfs -x devtmpfs -x squashfs -x overlay
+      register: df
+      changed_when: false
+      failed_when: false
+
+    - name: Host basics
+      ansible.builtin.debug:
+        msg:
+          - "{{ inventory_hostname }}: {{ up_p.stdout | default('uptime n/a') }} | memory {{ mem.stdout | default('n/a') }}"
+          - "{{ reboot_txt }}"
+          - "{{ disk_txt }}"
+
+    - name: Record host basics
+      ansible.builtin.set_fact:
+        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, 'Host', 'Uptime / memory', 'INFO', (up_p.stdout | default('n/a')) ~ ' | memory ' ~ (mem.stdout | default('n/a'))], [inventory_hostname, 'Host', 'Reboot pending', ('WARN' if (reboot_req.stat.exists | default(false)) else 'OK'), reboot_txt], [inventory_hostname, 'Host', 'Disk usage', ('WARN' if hot | length > 0 else 'OK'), disk_txt]] }}"
 
 # ======================= Play 3: CI/CD and monitoring server =======================
 - name: FinEdge | Health - Jenkins, Kibana, Grafana (informational)
   hosts: "{{ cicd_hosts | default('finedge_cicd') }}"
   become: true
   gather_facts: false
+  ignore_errors: true
+  ignore_unreachable: true
   vars:
-    tool_infra:
-      - { name: Jenkins,        units: [jenkins],                   port: 8080, critical: false }
-      - { name: Kibana,         units: [kibana],                    port: 5602, critical: false }
-      - { name: Grafana,        units: [grafana-server, grafana],   port: 3000, critical: false }
-      - { name: Elasticsearch,  units: [elasticsearch],             port: 9200, critical: false, optional: true }
+    infra_components:
+      - { tier: Tools, name: Jenkins,       units: [jenkins],                 port: 8080, critical: false }
+      - { tier: Tools, name: Kibana,        units: [kibana],                  port: 5602, critical: false }
+      - { tier: Tools, name: Grafana,       units: [grafana-server, grafana], port: 3000, critical: false }
+      - { tier: Tools, name: Elasticsearch, units: [elasticsearch],           port: 9200, critical: false, optional: true }
+    hot: |-
+      {% set ns = namespace(h=[]) -%}
+      {% for l in df.stdout_lines[1:] -%}
+      {% set p = l.split() -%}
+      {% if p | length >= 6 and (p[4] | replace('%', '') | int) >= (disk_warn_pct | default(85) | int) -%}
+      {% set ns.h = ns.h + [p[5] ~ ' ' ~ p[4]] -%}
+      {% endif -%}
+      {% endfor -%}
+      {{ ns.h | join(', ') }}
+    reboot_txt: "{{ 'REBOOT REQUIRED (pending updates). After a reboot ALL services cold-start at once: see runbook section D.' if (reboot_req.stat.exists | default(false)) else 'no reboot pending' }}"
+    disk_txt: "{{ ('Filesystems at or above ' ~ (disk_warn_pct | default(85)) ~ '%: ' ~ hot) if hot | length > 0 else ('all filesystems below ' ~ (disk_warn_pct | default(85)) ~ '%') }}"
   tasks:
     - name: Listening TCP ports
       ansible.builtin.command: ss -ltn
@@ -169,28 +369,102 @@
       changed_when: false
       failed_when: false
 
-    - name: Probe tools
-      ansible.builtin.include_tasks: tasks/probe_systemd.yml
-      loop: "{{ tool_infra }}"
+    - name: Probe systemd units
+      ansible.builtin.shell: |
+        for u in {{ item.units | join(' ') }}; do
+          if [ "$(systemctl show "$u" -p LoadState --value 2>/dev/null)" = "loaded" ]; then
+            echo "UNIT=$u"
+            echo "ACTIVE=$(systemctl is-active "$u" 2>/dev/null)"
+            echo "SUB=$(systemctl show "$u" -p SubState --value 2>/dev/null)"
+            echo "ENABLED=$(systemctl is-enabled "$u" 2>/dev/null)"
+            echo "SINCE=$(systemctl show "$u" -p ActiveEnterTimestamp --value 2>/dev/null)"
+            exit 0
+          fi
+        done
+        echo "UNIT=none"
+      args:
+        executable: /bin/bash
+      register: probes
+      changed_when: false
+      failed_when: false
+      loop: "{{ infra_components }}"
       loop_control:
-        loop_var: comp
-        label: "{{ comp.name }}"
+        label: "{{ item.name }}"
+
+    - name: Record systemd results
+      ansible.builtin.set_fact:
+        probe_lines: "{{ probe_lines | default([]) + [line] }}"
+        probe_bad: "{{ probe_bad | default([]) + ([comp.name] if (verdict == 'DOWN' and (comp.critical | default(true))) else []) }}"
+        boot_warn: "{{ boot_warn | default([]) + ([comp.name ~ ' (' ~ unit ~ ') is ' ~ enabled ~ ', so it will NOT start by itself after a reboot'] if (unit != 'none' and enabled != 'enabled') else []) }}"
+        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, comp.tier | default('Service'), comp.name, verdict, detail ~ note]] }}"
+      vars:
+        comp: "{{ infra_components[idx] }}"
+        out: "{{ probes.results[idx].stdout | default('UNIT=none') }}"
+        unit: "{{ out | regex_findall('UNIT=([A-Za-z0-9@._:-]+)') | first | default('none') }}"
+        active: "{{ out | regex_findall('ACTIVE=([a-z-]+)') | first | default('unknown') }}"
+        sub: "{{ out | regex_findall('SUB=([a-z-]+)') | first | default('?') }}"
+        enabled: "{{ out | regex_findall('ENABLED=([a-z-]+)') | first | default('unknown') }}"
+        since: "{{ out | regex_findall('SINCE=(.*)') | first | default('') }}"
+        port_up: "{{ ss.stdout is search(':' ~ comp.port ~ ' ') }}"
+        verdict: "{{ 'UP' if ((unit != 'none' and active == 'active' and port_up) or (unit == 'none' and port_up)) else ('ABSENT' if (unit == 'none' and (comp.optional | default(false))) else 'DOWN') }}"
+        tag: "{{ '[ UP ]' if verdict == 'UP' else ('[ -- ]' if verdict == 'ABSENT' else '[DOWN]') }}"
+        port_txt: "{{ 'port ' ~ comp.port ~ (' listening' if port_up else ' NOT listening') }}"
+        detail: "{{ ('systemd ' ~ unit ~ ' is ' ~ active ~ ' (' ~ sub ~ '), enabled=' ~ enabled ~ (', since ' ~ since if since else '') ~ '; ' ~ port_txt) if unit != 'none' else ('no systemd unit found (tried ' ~ (comp.units | join(', ')) ~ '); ' ~ port_txt ~ (' - running outside systemd (Docker or manual?)' if port_up else '')) }}"
+        note: "{{ '  (non-critical)' if (verdict == 'DOWN' and not (comp.critical | default(true))) else ('  (not present, fine if unused)' if verdict == 'ABSENT' else '') }}"
+        line: "{{ tag }} {{ comp.name }}: {{ detail }}{{ note }}"
+      loop: "{{ range(infra_components | length) | list }}"
+      loop_control:
+        loop_var: idx
+        label: "{{ infra_components[idx].name }}"
 
     - name: Tools report
       ansible.builtin.debug:
-        msg: "{{ probe_lines }}"
+        msg: "{{ probe_lines | default([]) }}"
+
+    - name: Uptime
+      ansible.builtin.command: uptime -p
+      register: up_p
+      changed_when: false
+      failed_when: false
+
+    - name: Pending reboot flag (the "System restart required" banner)
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_req
+
+    - name: Memory
+      ansible.builtin.shell: free -m | awk 'NR==2{print $3"/"$2" MB used"}'
+      register: mem
+      changed_when: false
+      failed_when: false
+
+    - name: Filesystems
+      ansible.builtin.command: df -P -x tmpfs -x devtmpfs -x squashfs -x overlay
+      register: df
+      changed_when: false
+      failed_when: false
 
     - name: Host basics
-      ansible.builtin.include_tasks: tasks/host_basics.yml
+      ansible.builtin.debug:
+        msg:
+          - "{{ inventory_hostname }}: {{ up_p.stdout | default('uptime n/a') }} | memory {{ mem.stdout | default('n/a') }}"
+          - "{{ reboot_txt }}"
+          - "{{ disk_txt }}"
+
+    - name: Record host basics
+      ansible.builtin.set_fact:
+        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, 'Host', 'Uptime / memory', 'INFO', (up_p.stdout | default('n/a')) ~ ' | memory ' ~ (mem.stdout | default('n/a'))], [inventory_hostname, 'Host', 'Reboot pending', ('WARN' if (reboot_req.stat.exists | default(false)) else 'OK'), reboot_txt], [inventory_hostname, 'Host', 'Disk usage', ('WARN' if hot | length > 0 else 'OK'), disk_txt]] }}"
 
 # ======================= Play 4: backend server =======================
 - name: FinEdge | Health - backend services (Supervisor), messaging and cache
   hosts: "{{ target_hosts | default('cwgfinEBEND') }}"
   become: true
   gather_facts: false
+  ignore_errors: true
+  ignore_unreachable: true
   vars:
-    # Supervisor program names as they exist in /etc/supervisor/conf.d on the server. Port = the port that service listens on.
-    # subscription-service is NOT here: it has no conf on this server (it runs elsewhere, probably the licence/admin server).
+    # Supervisor program names exactly as in /etc/supervisor/conf.d on the server. Port = what that service listens on.
+    # subscription-service is NOT here: it has no conf on this server (it runs elsewhere).
     backend_services:
       - { name: service-registry,           port: 8761 }
       - { name: api-gateway,                port: 8765 }
@@ -206,25 +480,29 @@
       - { name: audit-query-service,        port: 8090 }
       - { name: foreign-exchange-service,   port: 8091 }
 
-    local_infra:
-      - { name: Redis,             units: [redis-server, redis],                                   port: 6379,  critical: true }
-      - { name: Kafka,             units: [kafka, confluent-kafka, kafka-server],                  port: 9092,  critical: true }
-      - { name: ZooKeeper,         units: [zookeeper, confluent-zookeeper],                        port: 2181,  critical: false, optional: true }
-      - { name: Schema Registry,   units: [confluent-schema-registry, schema-registry],            port: 18081, critical: true }
-      - { name: Debezium Connect,  units: [confluent-kafka-connect, kafka-connect, connect-distributed, debezium, debezium-connect], port: 18083, critical: true }
-
+    infra_components:
+      - { tier: Messaging / cache, name: Redis,            units: [redis-server, redis],                       port: 6379,  critical: true }
+      - { tier: Messaging / cache, name: Kafka,            units: [kafka, confluent-kafka, kafka-server],      port: 9092,  critical: true }
+      - { tier: Messaging / cache, name: ZooKeeper,        units: [zookeeper, confluent-zookeeper],            port: 2181,  critical: false, optional: true }
+      - { tier: Messaging / cache, name: Schema Registry,  units: [confluent-schema-registry, schema-registry], port: 18081, critical: true }
+      - { tier: Messaging / cache, name: Debezium Connect, units: [confluent-kafka-connect, kafka-connect, connect-distributed, debezium, debezium-connect], port: 18083, critical: true }
+    hot: |-
+      {% set ns = namespace(h=[]) -%}
+      {% for l in df.stdout_lines[1:] -%}
+      {% set p = l.split() -%}
+      {% if p | length >= 6 and (p[4] | replace('%', '') | int) >= (disk_warn_pct | default(85) | int) -%}
+      {% set ns.h = ns.h + [p[5] ~ ' ' ~ p[4]] -%}
+      {% endif -%}
+      {% endfor -%}
+      {{ ns.h | join(', ') }}
+    reboot_txt: "{{ 'REBOOT REQUIRED (pending updates). After a reboot ALL services cold-start at once: see runbook section D.' if (reboot_req.stat.exists | default(false)) else 'no reboot pending' }}"
+    disk_txt: "{{ ('Filesystems at or above ' ~ (disk_warn_pct | default(85)) ~ '%: ' ~ hot) if hot | length > 0 else ('all filesystems below ' ~ (disk_warn_pct | default(85)) ~ '%') }}"
   tasks:
     - name: Supervisor status of every program
       ansible.builtin.command: supervisorctl status
       register: sup
       changed_when: false
       failed_when: false
-
-    - name: Stop if Supervisor cannot be queried
-      ansible.builtin.assert:
-        that: sup.stdout is search('RUNNING|STOPPED|FATAL|BACKOFF|STARTING|EXITED|UNKNOWN')
-        fail_msg: "supervisorctl status gave no program list on {{ inventory_hostname }}: {{ sup.stdout }} {{ sup.stderr }}"
-        quiet: true
 
     - name: Listening TCP ports
       ansible.builtin.command: ss -ltn
@@ -239,9 +517,10 @@
         svc_up: "{{ svc_up | default([]) + ([svc_item.name] if verdict == 'UP' else []) }}"
         svc_wait: "{{ svc_wait | default([]) + ([svc_item.name] if verdict == 'STARTING' else []) }}"
         svc_bad: "{{ svc_bad | default([]) + ([svc_item.name] if verdict == 'DOWN' else []) }}"
+        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, 'Backend service', svc_item.name, ('WAIT' if verdict == 'STARTING' else verdict), state ~ (' (' ~ detail ~ ')' if detail else '') ~ ' | port ' ~ svc_item.port ~ (' listening' if port_up else ' NOT listening')]] }}"
       vars:
-        state: "{{ sup.stdout | regex_findall('^' ~ svc_item.name ~ ' +([A-Z]+)', multiline=True) | first | default('NOT-IN-SUPERVISOR') }}"
-        detail: "{{ sup.stdout | regex_findall('^' ~ svc_item.name ~ ' +[A-Z]+ +(.*)$', multiline=True) | first | default('') }}"
+        state: "{{ sup.stdout | default('') | regex_findall('^' ~ svc_item.name ~ ' +([A-Z]+)', multiline=True) | first | default('NOT-IN-SUPERVISOR') }}"
+        detail: "{{ sup.stdout | default('') | regex_findall('^' ~ svc_item.name ~ ' +[A-Z]+ +(.*)$', multiline=True) | first | default('') }}"
         port_up: "{{ ss.stdout is search(':' ~ svc_item.port ~ ' ') }}"
         recent: "{{ detail is search('uptime 0:0[01]:') }}"
         verdict: "{{ 'UP' if (state == 'RUNNING' and port_up) else ('STARTING' if ((state == 'RUNNING' and recent) or state == 'STARTING') else 'DOWN') }}"
@@ -254,24 +533,64 @@
 
     - name: Backend services
       ansible.builtin.debug:
-        msg: "{{ ['SUMMARY: ' ~ (svc_up | default([]) | length) ~ ' of ' ~ (backend_services | length) ~ ' services UP | starting: ' ~ (svc_wait | default([]) | join(', ') or 'none') ~ ' | DOWN: ' ~ (svc_bad | default([]) | join(', ') or 'none')] + svc_lines }}"
+        msg: "{{ ['SUMMARY: ' ~ (svc_up | default([]) | length) ~ ' of ' ~ (backend_services | length) ~ ' services UP | starting: ' ~ (svc_wait | default([]) | join(', ') or 'none') ~ ' | DOWN: ' ~ (svc_bad | default([]) | join(', ') or 'none')] + (svc_lines | default([])) }}"
 
     - name: Programs in Supervisor that this playbook does not know about
       ansible.builtin.debug:
         msg: "Unlisted Supervisor programs (add them to backend_services): {{ extra | join(', ') }}"
       vars:
         known: "{{ backend_services | map(attribute='name') | list }}"
-        present: "{{ sup.stdout_lines | map('regex_replace', ' .*$', '') | reject('equalto', '') | list }}"
+        present: "{{ (sup.stdout_lines | default([])) | map('regex_replace', ' .*$', '') | reject('equalto', '') | list }}"
         extra: "{{ present | difference(known) }}"
       when: extra | length > 0
 
-    # ---------- 2. messaging and cache on this host (systemctl) ----------
-    - name: Probe Redis, Kafka, ZooKeeper, Schema Registry, Debezium
-      ansible.builtin.include_tasks: tasks/probe_systemd.yml
-      loop: "{{ local_infra }}"
+    - name: Probe systemd units
+      ansible.builtin.shell: |
+        for u in {{ item.units | join(' ') }}; do
+          if [ "$(systemctl show "$u" -p LoadState --value 2>/dev/null)" = "loaded" ]; then
+            echo "UNIT=$u"
+            echo "ACTIVE=$(systemctl is-active "$u" 2>/dev/null)"
+            echo "SUB=$(systemctl show "$u" -p SubState --value 2>/dev/null)"
+            echo "ENABLED=$(systemctl is-enabled "$u" 2>/dev/null)"
+            echo "SINCE=$(systemctl show "$u" -p ActiveEnterTimestamp --value 2>/dev/null)"
+            exit 0
+          fi
+        done
+        echo "UNIT=none"
+      args:
+        executable: /bin/bash
+      register: probes
+      changed_when: false
+      failed_when: false
+      loop: "{{ infra_components }}"
       loop_control:
-        loop_var: comp
-        label: "{{ comp.name }}"
+        label: "{{ item.name }}"
+
+    - name: Record systemd results
+      ansible.builtin.set_fact:
+        probe_lines: "{{ probe_lines | default([]) + [line] }}"
+        probe_bad: "{{ probe_bad | default([]) + ([comp.name] if (verdict == 'DOWN' and (comp.critical | default(true))) else []) }}"
+        boot_warn: "{{ boot_warn | default([]) + ([comp.name ~ ' (' ~ unit ~ ') is ' ~ enabled ~ ', so it will NOT start by itself after a reboot'] if (unit != 'none' and enabled != 'enabled') else []) }}"
+        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, comp.tier | default('Service'), comp.name, verdict, detail ~ note]] }}"
+      vars:
+        comp: "{{ infra_components[idx] }}"
+        out: "{{ probes.results[idx].stdout | default('UNIT=none') }}"
+        unit: "{{ out | regex_findall('UNIT=([A-Za-z0-9@._:-]+)') | first | default('none') }}"
+        active: "{{ out | regex_findall('ACTIVE=([a-z-]+)') | first | default('unknown') }}"
+        sub: "{{ out | regex_findall('SUB=([a-z-]+)') | first | default('?') }}"
+        enabled: "{{ out | regex_findall('ENABLED=([a-z-]+)') | first | default('unknown') }}"
+        since: "{{ out | regex_findall('SINCE=(.*)') | first | default('') }}"
+        port_up: "{{ ss.stdout is search(':' ~ comp.port ~ ' ') }}"
+        verdict: "{{ 'UP' if ((unit != 'none' and active == 'active' and port_up) or (unit == 'none' and port_up)) else ('ABSENT' if (unit == 'none' and (comp.optional | default(false))) else 'DOWN') }}"
+        tag: "{{ '[ UP ]' if verdict == 'UP' else ('[ -- ]' if verdict == 'ABSENT' else '[DOWN]') }}"
+        port_txt: "{{ 'port ' ~ comp.port ~ (' listening' if port_up else ' NOT listening') }}"
+        detail: "{{ ('systemd ' ~ unit ~ ' is ' ~ active ~ ' (' ~ sub ~ '), enabled=' ~ enabled ~ (', since ' ~ since if since else '') ~ '; ' ~ port_txt) if unit != 'none' else ('no systemd unit found (tried ' ~ (comp.units | join(', ')) ~ '); ' ~ port_txt ~ (' - running outside systemd (Docker or manual?)' if port_up else '')) }}"
+        note: "{{ '  (non-critical)' if (verdict == 'DOWN' and not (comp.critical | default(true))) else ('  (not present, fine if unused)' if verdict == 'ABSENT' else '') }}"
+        line: "{{ tag }} {{ comp.name }}: {{ detail }}{{ note }}"
+      loop: "{{ range(infra_components | length) | list }}"
+      loop_control:
+        loop_var: idx
+        label: "{{ infra_components[idx].name }}"
 
     - name: PostgreSQL reachable from this host
       ansible.builtin.wait_for:
@@ -283,7 +602,7 @@
 
     - name: Messaging, cache and database reachability
       ansible.builtin.debug:
-        msg: "{{ probe_lines + [db_line] }}"
+        msg: "{{ probe_lines | default([]) + [db_line] }}"
       vars:
         db_line: "{{ '[ UP ] PostgreSQL 172.20.250.9:5432 is reachable from this host' if not (db_reach.failed | default(false)) else '[DOWN] PostgreSQL 172.20.250.9:5432 is NOT reachable from this host' }}"
 
@@ -335,9 +654,13 @@
     - name: Deeper checks
       ansible.builtin.debug:
         msg:
-          - "Redis PING reply: {{ (redis_ping.stdout | default('') | trim) or 'no reply' }}   (+PONG is fine; -NOAUTH also means Redis is alive)"
-          - "Schema Registry /subjects: {{ 'answers' if (sr.status | default(0)) == 200 else 'no answer' }}"
-          - "Debezium license-audit-outbox-connector: connector={{ ((dbz.json | default({})).connector | default({})).state | default('unreachable') }} tasks={{ ((dbz.json | default({})).tasks | default([])) | map(attribute='state') | list }}"
+          - "Redis PING reply: {{ ping_txt }}   (+PONG is fine; -NOAUTH also means Redis is alive)"
+          - "Schema Registry /subjects: {{ sr_txt }}"
+          - "Debezium license-audit-outbox-connector: {{ dbz_txt }}"
+      vars:
+        ping_txt: "{{ (redis_ping.stdout | default('') | trim) or 'no reply' }}"
+        sr_txt: "{{ 'answers' if (sr.status | default(0)) == 200 else 'no answer' }}"
+        dbz_txt: "connector={{ ((dbz.json | default({})).connector | default({})).state | default('unreachable') }} tasks={{ ((dbz.json | default({})).tasks | default([])) | map(attribute='state') | list }}"
 
     - name: Eureka report (every instance should be UP)
       ansible.builtin.debug:
@@ -367,33 +690,325 @@
       ansible.builtin.debug:
         msg: "{{ dock.stdout_lines if dock.stdout_lines | length > 0 else ['no containers'] }}"
 
+    - name: Record backend extras for the report
+      ansible.builtin.set_fact:
+        host_problems: "{{ (svc_bad | default([])) + (probe_bad | default([])) + (['PostgreSQL unreachable from this host'] if db_bad else []) }}"
+        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, 'Database', 'PostgreSQL reachable from backend', ('DOWN' if db_bad else 'UP'), '172.20.250.9:5432'], [inventory_hostname, 'Messaging / cache', 'Redis PING', ('UP' if (ping_txt is search('PONG|NOAUTH')) else 'INFO'), ping_txt], [inventory_hostname, 'Messaging / cache', 'Schema Registry /subjects', ('UP' if (sr.status | default(0)) == 200 else 'INFO'), sr_txt], [inventory_hostname, 'Messaging / cache', 'Debezium connector', ('UP' if (dbz_state == 'RUNNING') else 'WARN'), 'license-audit-outbox-connector state=' ~ dbz_state], [inventory_hostname, 'Messaging / cache', 'Eureka registrations', ('OK' if eureka_not_up | length == 0 else 'WARN'), (apps | length | string) ~ ' apps registered' ~ ((';  not all UP: ' ~ eureka_not_up) if eureka_not_up | length > 0 else '')], [inventory_hostname, 'Docker', 'Containers', 'INFO', (dock.stdout_lines | join(' ;; ')) or 'no containers']] }}"
+      vars:
+        db_bad: "{{ db_reach.failed | default(false) }}"
+        ping_txt: "{{ (redis_ping.stdout | default('') | trim) or 'no reply' }}"
+        sr_txt: "{{ 'answers' if (sr.status | default(0)) == 200 else 'no answer' }}"
+        dbz_state: "{{ ((dbz.json | default({})).connector | default({})).state | default('unreachable') }}"
+        raw_apps: "{{ ((eureka.json | default({})).applications | default({})).application | default([]) }}"
+        apps: "{{ [raw_apps] if raw_apps is mapping else raw_apps }}"
+        eureka_not_up: |-
+          {% set ns = namespace(n=[]) -%}
+          {% for a in apps -%}
+          {% set insts = [a.instance] if a.instance is mapping else a.instance -%}
+          {% if (insts | rejectattr('status', 'equalto', 'UP') | list | length) > 0 -%}
+          {% set ns.n = ns.n + [a.name] -%}
+          {% endif -%}
+          {% endfor -%}
+          {{ ns.n | join(', ') }}
+
+    - name: Uptime
+      ansible.builtin.command: uptime -p
+      register: up_p
+      changed_when: false
+      failed_when: false
+
+    - name: Pending reboot flag (the "System restart required" banner)
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_req
+
+    - name: Memory
+      ansible.builtin.shell: free -m | awk 'NR==2{print $3"/"$2" MB used"}'
+      register: mem
+      changed_when: false
+      failed_when: false
+
+    - name: Filesystems
+      ansible.builtin.command: df -P -x tmpfs -x devtmpfs -x squashfs -x overlay
+      register: df
+      changed_when: false
+      failed_when: false
+
     - name: Host basics
-      ansible.builtin.include_tasks: tasks/host_basics.yml
+      ansible.builtin.debug:
+        msg:
+          - "{{ inventory_hostname }}: {{ up_p.stdout | default('uptime n/a') }} | memory {{ mem.stdout | default('n/a') }}"
+          - "{{ reboot_txt }}"
+          - "{{ disk_txt }}"
 
-    - name: Remember problems for the final verdict
+    - name: Record host basics
       ansible.builtin.set_fact:
-        host_problems: "{{ (svc_bad | default([])) + (probe_bad | default([])) + (['PostgreSQL unreachable from this host'] if (db_reach.failed | default(false)) else []) }}"
+        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, 'Host', 'Uptime / memory', 'INFO', (up_p.stdout | default('n/a')) ~ ' | memory ' ~ (mem.stdout | default('n/a'))], [inventory_hostname, 'Host', 'Reboot pending', ('WARN' if (reboot_req.stat.exists | default(false)) else 'OK'), reboot_txt], [inventory_hostname, 'Host', 'Disk usage', ('WARN' if hot | length > 0 else 'OK'), disk_txt]] }}"
 
-# ======================= Play 5: verdict =======================
-# Verdict lives in its own play so that one failing host can never stop the other checks from running.
-- name: FinEdge | Health - overall verdict
-  hosts: localhost
-  connection: local
+# ======================= Play 5: build and publish the Excel report =======================
+# Runs on the "report host" (default: the cicd_hosts host, i.e. the Jenkins server). Skipped if that group/host is not in the inventory.
+- name: FinEdge | Health - Excel report
+  hosts: "{{ report_host | default(cicd_hosts | default('finedge_cicd')) }}"
+  become: true
   gather_facts: false
+  ignore_errors: true
+  ignore_unreachable: true
+  vars:
+    report_dir: /var/lib/jenkins/userContent/health-reports
+    report_url_base: http://172.20.250.6:8080/userContent/health-reports
+    report_owner: jenkins
+    report_keep_days: 14
   tasks:
-    - name: Collect problems from every host checked above
+    - name: Gather the rows reported by every host
       ansible.builtin.set_fact:
-        all_problems: "{{ all_problems | default([]) + [h ~ ': ' ~ (hostvars[h].host_problems | join(', '))] }}"
+        all_rows: "{{ all_rows | default([]) + (hostvars[h].report_rows | default([])) }}"
+        all_problems: "{{ all_problems | default([]) + ([h ~ ': ' ~ (hostvars[h].host_problems | join(', '))] if (hostvars[h].host_problems | default([]) | length > 0) else []) }}"
       loop: "{{ hostvars.keys() | list }}"
       loop_control:
         loop_var: h
-      when: hostvars[h].host_problems | default([]) | length > 0
+
+    - name: Work out the summary
+      ansible.builtin.set_fact:
+        payload:
+          sheets:
+            - name: Summary
+              header: [Item, Value]
+              widths: [26, 120]
+              rows:
+                - ['Overall', "{{ 'HEALTHY' if all_problems | default([]) | length == 0 else 'PROBLEMS' }}"]
+                - ['Critical problems', "{{ all_problems | default([]) | join('  ||  ') or 'none' }}"]
+                - ['Hosts reported', "{{ all_rows | default([]) | map('first') | unique | join(', ') }}"]
+                - ['UP / OK', "{{ (all_rows | default([]) | selectattr('3', 'in', ['UP', 'OK']) | list | length) }}"]
+                - ['DOWN / MISSING', "{{ (all_rows | default([]) | selectattr('3', 'in', ['DOWN', 'MISSING']) | list | length) }}"]
+                - ['WAIT / WARN', "{{ (all_rows | default([]) | selectattr('3', 'in', ['WAIT', 'WARN']) | list | length) }}"]
+            - name: Details
+              header: [Host, Tier, Component, Status, Detail]
+              widths: [20, 20, 34, 11, 130]
+              rows: "{{ all_rows | default([]) }}"
+
+    - name: Report folder
+      ansible.builtin.file:
+        path: "{{ report_dir }}"
+        state: directory
+        owner: "{{ report_owner }}"
+        mode: "0755"
+      run_once: true
+
+    - name: Upload the data
+      ansible.builtin.copy:
+        content: "{{ payload | to_json }}"
+        dest: /tmp/finedge_rows.json
+        mode: "0600"
+      run_once: true
+
+    - name: Upload the XLSX writer (standard library only, no extra packages)
+      ansible.builtin.copy:
+        dest: /tmp/finedge_make_report.py
+        mode: "0700"
+        content: |
+          {% raw %}
+          import sys, json, zipfile, os, re, time, datetime
+          from xml.sax.saxutils import escape
+
+          def col(n):
+              s = ''
+              n += 1
+              while n:
+                  n, r = divmod(n - 1, 26)
+                  s = chr(65 + r) + s
+              return s
+
+          def clean(v):
+              return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', str(v))
+
+          def status_style(v):
+              u = str(v).strip().upper()
+              if u in ('UP', 'OK', 'HEALTHY'):
+                  return 2
+              if u in ('DOWN', 'MISSING', 'FAILED', 'PROBLEMS'):
+                  return 3
+              if u in ('WAIT', 'WARN', 'ABSENT', 'INFO'):
+                  return 4
+              return 0
+
+          def sheet_xml(header, rows, widths):
+              allrows = [header] + rows
+              out = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+                     '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
+                     '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>',
+                     '<cols>' + ''.join('<col min="%d" max="%d" width="%s" customWidth="1"/>' % (i + 1, i + 1, w) for i, w in enumerate(widths)) + '</cols>',
+                     '<sheetData>']
+              for r, row in enumerate(allrows, start=1):
+                  cells = []
+                  for c in range(len(header)):
+                      val = row[c] if c < len(row) else ''
+                      if r == 1:
+                          st = 1
+                      elif header[c] == 'Status':
+                          st = status_style(val)
+                      else:
+                          st = 0
+                      cells.append('<c r="%s%d" t="inlineStr" s="%d"><is><t xml:space="preserve">%s</t></is></c>' % (col(c), r, st, escape(clean(val))))
+                  out.append('<row r="%d">%s</row>' % (r, ''.join(cells)))
+              out.append('</sheetData>')
+              out.append('<autoFilter ref="A1:%s%d"/>' % (col(len(header) - 1), len(allrows)))
+              out.append('</worksheet>')
+              return ''.join(out)
+
+          STYLES = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+           '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+           '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>'
+           '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts>'
+           '<fills count="6"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>'
+           '<fill><patternFill patternType="solid"><fgColor rgb="FF1F3864"/><bgColor indexed="64"/></patternFill></fill>'
+           '<fill><patternFill patternType="solid"><fgColor rgb="FFC6EFCE"/><bgColor indexed="64"/></patternFill></fill>'
+           '<fill><patternFill patternType="solid"><fgColor rgb="FFFFC7CE"/><bgColor indexed="64"/></patternFill></fill>'
+           '<fill><patternFill patternType="solid"><fgColor rgb="FFFFEB9C"/><bgColor indexed="64"/></patternFill></fill></fills>'
+           '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+           '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+           '<cellXfs count="5">'
+           '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+           '<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
+           '<xf numFmtId="0" fontId="0" fillId="3" borderId="0" xfId="0" applyFill="1"/>'
+           '<xf numFmtId="0" fontId="0" fillId="4" borderId="0" xfId="0" applyFill="1"/>'
+           '<xf numFmtId="0" fontId="0" fillId="5" borderId="0" xfId="0" applyFill="1"/>'
+           '</cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>')
+
+          def write_xlsx(path, sheets):
+              n = len(sheets)
+              ct = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+                    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
+                    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
+                    '<Default Extension="xml" ContentType="application/xml"/>',
+                    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
+                    '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>']
+              for i in range(n):
+                  ct.append('<Override PartName="/xl/worksheets/sheet%d.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' % (i + 1))
+              ct.append('</Types>')
+              rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+                      '</Relationships>')
+              wb = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+                    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>']
+              wbrels = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+                        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">']
+              for i, s in enumerate(sheets):
+                  nm = re.sub(r'[\[\]\*\?:/\\]', '', s['name'])[:31]
+                  wb.append('<sheet name="%s" sheetId="%d" r:id="rId%d"/>' % (escape(nm), i + 1, i + 1))
+                  wbrels.append('<Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet%d.xml"/>' % (i + 1, i + 1))
+              wb.append('</sheets></workbook>')
+              wbrels.append('<Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' % (n + 1))
+              wbrels.append('</Relationships>')
+              tmp = path + '.tmp'
+              with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as z:
+                  z.writestr('[Content_Types].xml', ''.join(ct))
+                  z.writestr('_rels/.rels', rels)
+                  z.writestr('xl/workbook.xml', ''.join(wb))
+                  z.writestr('xl/_rels/workbook.xml.rels', ''.join(wbrels))
+                  z.writestr('xl/styles.xml', STYLES)
+                  for i, s in enumerate(sheets):
+                      z.writestr('xl/worksheets/sheet%d.xml' % (i + 1), sheet_xml(s['header'], s['rows'], s['widths']))
+              os.replace(tmp, path)
+
+          def main():
+              rows_json, outdir, keep_days = sys.argv[1], sys.argv[2], int(sys.argv[3])
+              data = json.load(open(rows_json))
+              now = datetime.datetime.now()
+              data['sheets'][0]['rows'].insert(0, ['Generated (server time)', now.strftime('%Y-%m-%d %H:%M:%S')])
+              os.makedirs(outdir, exist_ok=True)
+              stamped = os.path.join(outdir, 'finedge-health-%s.xlsx' % now.strftime('%Y%m%d-%H%M%S'))
+              latest = os.path.join(outdir, 'finedge-health-latest.xlsx')
+              write_xlsx(stamped, data['sheets'])
+              write_xlsx(latest, data['sheets'])
+              cutoff = time.time() - keep_days * 86400
+              for f in os.listdir(outdir):
+                  if re.match(r'finedge-health-\d{8}-\d{6}\.xlsx$', f):
+                      p = os.path.join(outdir, f)
+                      if os.path.getmtime(p) < cutoff:
+                          os.remove(p)
+              print(json.dumps({'latest': os.path.basename(latest), 'stamped': os.path.basename(stamped)}))
+
+          main()
+          {% endraw %}
+      run_once: true
+
+    - name: Build the XLSX
+      ansible.builtin.command: "python3 /tmp/finedge_make_report.py /tmp/finedge_rows.json {{ report_dir }} {{ report_keep_days }}"
+      register: rep
+      changed_when: true
+      run_once: true
+
+    - name: Let the report owner read the files
+      ansible.builtin.file:
+        path: "{{ report_dir }}"
+        state: directory
+        owner: "{{ report_owner }}"
+        recurse: true
+      run_once: true
+
+    - name: Remove temp files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: [/tmp/finedge_rows.json, /tmp/finedge_make_report.py]
+      run_once: true
+
+    - name: Remember where the report is
+      ansible.builtin.set_fact:
+        report_url: "{{ report_url_base }}/{{ (rep.stdout | from_json).latest }}"
+        report_url_stamped: "{{ report_url_base }}/{{ (rep.stdout | from_json).stamped }}"
+      run_once: true
+      when: (rep.rc | default(1)) == 0
+
+    - name: Show the AWX job artifact
+      ansible.builtin.set_stats:
+        data:
+          health_report_url: "{{ report_url }}"
+      run_once: true
+      when: (rep.rc | default(1)) == 0
+
+    - name: Report location
+      ansible.builtin.debug:
+        msg:
+          - "EXCEL REPORT (latest): {{ report_url }}"
+          - "This run:              {{ report_url_stamped }}"
+          - "Log in to Jenkins in the same browser first if it asks."
+      run_once: true
+      when: (rep.rc | default(1)) == 0
+
+# ======================= Play 6: summary (and optional failure) =======================
+- name: FinEdge | Health - overall verdict
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  vars:
+    fail_on_problems: false
+  tasks:
+    - name: Gather results
+      ansible.builtin.set_fact:
+        all_rows: "{{ all_rows | default([]) + (hostvars[h].report_rows | default([])) }}"
+        all_problems: "{{ all_problems | default([]) + ([h ~ ': ' ~ (hostvars[h].host_problems | join(', '))] if (hostvars[h].host_problems | default([]) | length > 0) else []) }}"
+        report_urls: "{{ report_urls | default([]) + ([hostvars[h].report_url] if (hostvars[h].report_url is defined) else []) }}"
+      loop: "{{ hostvars.keys() | list }}"
+      loop_control:
+        loop_var: h
 
     - name: Overall result
       ansible.builtin.debug:
-        msg: "{{ 'ALL CHECKED SERVICES HEALTHY' if all_problems | default([]) | length == 0 else all_problems }}"
+        msg: "{{ ['ALL CHECKED SERVICES HEALTHY'] if all_problems | default([]) | length == 0 else ['CRITICAL PROBLEMS:'] + all_problems }}"
 
-    - name: Fail the job if anything is down
+    - name: Where is the Excel report
+      ansible.builtin.debug:
+        msg: "{{ ('Excel report: ' ~ (report_urls | first)) if (report_urls | default([]) | length > 0) else 'No Excel report was published (no report host in the inventory, or it was unreachable). Full table below.' }}"
+
+    - name: Full table (shown only when no Excel report was published)
+      ansible.builtin.debug:
+        msg: "{{ ['Host | Tier | Component | Status | Detail'] + (all_rows | default([]) | map('join', ' | ') | list) }}"
+      when: report_urls | default([]) | length == 0
+
+    - name: Fail the job if asked to (extra var fail_on_problems=true)
       ansible.builtin.fail:
         msg: "UNHEALTHY -> {{ all_problems }}"
-      when: all_problems | default([]) | length > 0
+      when: (fail_on_problems | bool) and (all_problems | default([]) | length > 0)
