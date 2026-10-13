@@ -3,37 +3,35 @@
 # READ-ONLY. Changes nothing on the servers.
 #
 # It NEVER fails the job by default (ignore_errors / ignore_unreachable on every play). The result is the REPORT:
-#   * the job output ([ UP ] / [WAIT] / [DOWN] lines) and the FINAL RESULT block on the last lines
-#   * an Excel file you can download (see "Excel report")
-# To make the job turn RED when something critical is down (scheduled runs + notifications):
+#   * the job output (lines marked [ UP ] / [WAIT] / [DOWN])
+#   * an Excel file you can download (see "Excel report" below)
+# To make the job turn RED when something critical is down (useful for scheduled runs + notifications):
 #   extra var   fail_on_problems: true
 #
 # What it reports
-#   Backend services  : Supervisor state (RUNNING/FATAL/BACKOFF/STOPPED), pid, uptime, port listening, AND whether the
-#                       service is registered UP in Eureka. Also shows services Eureka knows about that run on OTHER servers.
-#   Messaging / cache : Redis, Schema Registry, Debezium Connect (kafka-connect) via systemctl; Kafka (container kafka-kraft,
-#                       KRaft mode, no ZooKeeper), Kafka UI and RedisInsight via docker; Docker engine enabled at boot.
-#   Database          : PostgreSQL via systemctl, pg_isready, databases exist, connections vs limit, Debezium replication slot lag.
+#   Backend services  : Supervisor state (RUNNING/FATAL/BACKOFF/STOPPED), pid, uptime + whether the service port listens.
+#   Messaging / cache : Redis, Kafka, ZooKeeper, Schema Registry, Debezium Connect via systemctl (+ port).
+#   Database          : PostgreSQL via systemctl, pg_isready, databases exist, connections vs limit, replication slots.
 #   Frontend          : nginx via systemctl, site answers, live release.
-#   Tools server      : Jenkins, Kibana, Grafana, Elasticsearch (informational, never critical).
+#   Tools server      : Jenkins, Kibana, Grafana, Elasticsearch (informational).
 #   Every host        : uptime, memory, pending reboot, disks >= 85% full.
 #
 # Hosts (inventory host or group names; override with extra vars):
 #   frontend_hosts (cwgfinEFEND)  db_hosts (finedge_db)  cicd_hosts (finedge_cicd)  target_hosts (cwgfinEBEND = backend)
-#   Only these hosts are touched and reported. The rest of a dynamic (Nutanix) inventory is ignored.
+#   A group that does not exist is skipped with a warning.
 #
 # Excel report
-#   Built on the "report host" (default: the cicd_hosts host = Jenkins server) and saved in
-#     report_dir       /var/lib/jenkins/userContent/health-reports/
-#   Jenkins serves that folder, so download it in a browser (log in to Jenkins first):
-#     latest file      http://172.20.250.6:8080/userContent/health-reports/finedge-health-latest.xlsx
-#     all files        http://172.20.250.6:8080/userContent/health-reports/
-#   The URL is printed in the FINAL RESULT block and attached to the AWX job (Details tab > Artifacts: health_report_url).
-#   Times inside the workbook are Lagos time (WAT). The servers' own clocks are on New York time (EDT).
-#   Overrides: report_host, report_dir, report_url_base, report_owner (jenkins), report_keep_days (14).
-#   If there is no report host, the whole table is printed in the job output instead.
+#   After the checks, one XLSX is built on the "report host" (default: the cicd_hosts host) and saved to
+#     report_dir      default /var/lib/jenkins/userContent/health-reports      (Jenkins serves userContent files)
+#   Download (log in to Jenkins first):
+#     report_url_base default http://172.20.250.6:8080/userContent/health-reports/finedge-health-latest.xlsx
+#   A timestamped copy is kept for report_keep_days (default 14). Needs python3 on the report host.
+#   If there is no report host, the whole table is printed in the job output instead (copy into Excel).
+#   Overrides: report_host, report_dir, report_url_base, report_owner (default jenkins), report_keep_days.
 #
-# Tunables (extra vars): disk_warn_pct (85), conn_warn_pct (80), wal_warn_mb (5120)
+# Unit names for Redis/Kafka/etc. are GUESSES (several candidates are tried). Find the real ones with:
+#   systemctl list-units --type=service --all | grep -Ei 'redis|kafka|zookeeper|schema|connect|postgres|nginx'
+#   docker ps -a
 
 # ======================= Play 1: frontends =======================
 - name: FinEdge | Health - frontends
@@ -58,11 +56,6 @@
     reboot_txt: "{{ 'REBOOT REQUIRED (pending updates). After a reboot ALL services cold-start at once: see runbook section D.' if (reboot_req.stat.exists | default(false)) else 'no reboot pending' }}"
     disk_txt: "{{ ('Filesystems at or above ' ~ (disk_warn_pct | default(85)) ~ '%: ' ~ hot) if hot | length > 0 else ('all filesystems below ' ~ (disk_warn_pct | default(85)) ~ '%') }}"
   tasks:
-    - name: Mark this host as checked (the report covers ONLY these hosts, never the whole dynamic inventory)
-      ansible.builtin.group_by:
-        key: finedge_health_checked
-      changed_when: false
-
     - name: Listening TCP ports
       ansible.builtin.command: ss -ltn
       register: ss
@@ -105,12 +98,11 @@
         sub: "{{ out | regex_findall('SUB=([a-z-]+)') | first | default('?') }}"
         enabled: "{{ out | regex_findall('ENABLED=([a-z-]+)') | first | default('unknown') }}"
         since: "{{ out | regex_findall('SINCE=(.*)') | first | default('') }}"
-        has_port: "{{ comp.port is defined }}"
-        port_up: "{{ (ss.stdout is search(':' ~ comp.port ~ ' ')) if has_port else true }}"
-        verdict: "{{ 'UP' if ((unit != 'none' and active == 'active' and port_up) or (unit == 'none' and has_port and port_up)) else ('ABSENT' if (unit == 'none' and (comp.optional | default(false))) else 'DOWN') }}"
+        port_up: "{{ ss.stdout is search(':' ~ comp.port ~ ' ') }}"
+        verdict: "{{ 'UP' if ((unit != 'none' and active == 'active' and port_up) or (unit == 'none' and port_up)) else ('ABSENT' if (unit == 'none' and (comp.optional | default(false))) else 'DOWN') }}"
         tag: "{{ '[ UP ]' if verdict == 'UP' else ('[ -- ]' if verdict == 'ABSENT' else '[DOWN]') }}"
-        port_txt: "{{ ('port ' ~ comp.port ~ (' listening' if port_up else ' NOT listening')) if has_port else 'no port to check' }}"
-        detail: "{{ ('systemd ' ~ unit ~ ' is ' ~ active ~ ' (' ~ sub ~ '), enabled=' ~ enabled ~ (', since ' ~ since if since else '') ~ '; ' ~ port_txt) if unit != 'none' else ('no systemd unit found (tried ' ~ (comp.units | join(', ')) ~ '); ' ~ port_txt ~ (' - running outside systemd (Docker or manual?)' if (has_port and port_up) else '')) }}"
+        port_txt: "{{ 'port ' ~ comp.port ~ (' listening' if port_up else ' NOT listening') }}"
+        detail: "{{ ('systemd ' ~ unit ~ ' is ' ~ active ~ ' (' ~ sub ~ '), enabled=' ~ enabled ~ (', since ' ~ since if since else '') ~ '; ' ~ port_txt) if unit != 'none' else ('no systemd unit found (tried ' ~ (comp.units | join(', ')) ~ '); ' ~ port_txt ~ (' - running outside systemd (Docker or manual?)' if port_up else '')) }}"
         note: "{{ '  (non-critical)' if (verdict == 'DOWN' and not (comp.critical | default(true))) else ('  (not present, fine if unused)' if verdict == 'ABSENT' else '') }}"
         line: "{{ tag }} {{ comp.name }}: {{ detail }}{{ note }}"
       loop: "{{ range(infra_components | length) | list }}"
@@ -183,16 +175,14 @@
 
 # ======================= Play 2: database server =======================
 - name: FinEdge | Health - database server
-  hosts: "{{ db_hosts | default('finedge_db') }}"
+  hosts: "{{ db_hosts | default('finedge3DB') }}"
   become: true
   gather_facts: false
   ignore_errors: true
   ignore_unreachable: true
   vars:
-    conn_warn_pct: 80          # warn when connections in use reach this % of max_connections
-    wal_warn_mb: 5120          # warn when a replication slot holds back this much WAL
     infra_components:
-      # On Ubuntu 'postgresql' is a wrapper unit that shows "active (exited)": the port and pg_isready below are the real proof.
+      # On Ubuntu 'postgresql' is a wrapper unit; the port and pg_isready below are the real proof.
       - { tier: Database, name: PostgreSQL, units: [postgresql], port: 5432, critical: true }
     expected_dbs: [finedge, finedge_subscription]
     hot: |-
@@ -207,11 +197,6 @@
     reboot_txt: "{{ 'REBOOT REQUIRED (pending updates). After a reboot ALL services cold-start at once: see runbook section D.' if (reboot_req.stat.exists | default(false)) else 'no reboot pending' }}"
     disk_txt: "{{ ('Filesystems at or above ' ~ (disk_warn_pct | default(85)) ~ '%: ' ~ hot) if hot | length > 0 else ('all filesystems below ' ~ (disk_warn_pct | default(85)) ~ '%') }}"
   tasks:
-    - name: Mark this host as checked (the report covers ONLY these hosts, never the whole dynamic inventory)
-      ansible.builtin.group_by:
-        key: finedge_health_checked
-      changed_when: false
-
     - name: Listening TCP ports
       ansible.builtin.command: ss -ltn
       register: ss
@@ -254,12 +239,11 @@
         sub: "{{ out | regex_findall('SUB=([a-z-]+)') | first | default('?') }}"
         enabled: "{{ out | regex_findall('ENABLED=([a-z-]+)') | first | default('unknown') }}"
         since: "{{ out | regex_findall('SINCE=(.*)') | first | default('') }}"
-        has_port: "{{ comp.port is defined }}"
-        port_up: "{{ (ss.stdout is search(':' ~ comp.port ~ ' ')) if has_port else true }}"
-        verdict: "{{ 'UP' if ((unit != 'none' and active == 'active' and port_up) or (unit == 'none' and has_port and port_up)) else ('ABSENT' if (unit == 'none' and (comp.optional | default(false))) else 'DOWN') }}"
+        port_up: "{{ ss.stdout is search(':' ~ comp.port ~ ' ') }}"
+        verdict: "{{ 'UP' if ((unit != 'none' and active == 'active' and port_up) or (unit == 'none' and port_up)) else ('ABSENT' if (unit == 'none' and (comp.optional | default(false))) else 'DOWN') }}"
         tag: "{{ '[ UP ]' if verdict == 'UP' else ('[ -- ]' if verdict == 'ABSENT' else '[DOWN]') }}"
-        port_txt: "{{ ('port ' ~ comp.port ~ (' listening' if port_up else ' NOT listening')) if has_port else 'no port to check' }}"
-        detail: "{{ ('systemd ' ~ unit ~ ' is ' ~ active ~ ' (' ~ sub ~ '), enabled=' ~ enabled ~ (', since ' ~ since if since else '') ~ '; ' ~ port_txt) if unit != 'none' else ('no systemd unit found (tried ' ~ (comp.units | join(', ')) ~ '); ' ~ port_txt ~ (' - running outside systemd (Docker or manual?)' if (has_port and port_up) else '')) }}"
+        port_txt: "{{ 'port ' ~ comp.port ~ (' listening' if port_up else ' NOT listening') }}"
+        detail: "{{ ('systemd ' ~ unit ~ ' is ' ~ active ~ ' (' ~ sub ~ '), enabled=' ~ enabled ~ (', since ' ~ since if since else '') ~ '; ' ~ port_txt) if unit != 'none' else ('no systemd unit found (tried ' ~ (comp.units | join(', ')) ~ '); ' ~ port_txt ~ (' - running outside systemd (Docker or manual?)' if port_up else '')) }}"
         note: "{{ '  (non-critical)' if (verdict == 'DOWN' and not (comp.critical | default(true))) else ('  (not present, fine if unused)' if verdict == 'ABSENT' else '') }}"
         line: "{{ tag }} {{ comp.name }}: {{ detail }}{{ note }}"
       loop: "{{ range(infra_components | length) | list }}"
@@ -285,58 +269,40 @@
       changed_when: false
       failed_when: false
 
-    - name: Connection usage (used|max)
+    - name: Connection usage
       ansible.builtin.shell: |
-        sudo -u postgres psql -Atc "SELECT count(*) || '|' || current_setting('max_connections') FROM pg_stat_activity" 2>&1
+        sudo -u postgres psql -Atc "SELECT count(*) || ' of ' || current_setting('max_connections') || ' connections in use' FROM pg_stat_activity" 2>&1
       register: pg_conn
       changed_when: false
       failed_when: false
 
-    - name: Replication slots (name|active|MB of WAL held back)
+    - name: Replication slots (Debezium uses one)
       ansible.builtin.shell: |
-        sudo -u postgres psql -Atc "SELECT slot_name || '|' || active || '|' || coalesce(round(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) / 1024 / 1024)::bigint::text, '-') FROM pg_replication_slots" 2>&1
+        sudo -u postgres psql -Atc "SELECT slot_name || ' | active=' || active || ' | WAL kept back=' || coalesce(pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)), 'n/a') FROM pg_replication_slots" 2>&1
       register: pg_slots
       changed_when: false
       failed_when: false
-
-    - name: Record replication slots
-      ansible.builtin.set_fact:
-        slot_msgs: "{{ slot_msgs | default([]) + [msg] }}"
-        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, 'Database', 'Replication slot ' ~ sname, ('WARN' if (not active or wal_big) else 'OK'), msg]] }}"
-      vars:
-        parts: "{{ item.split('|') }}"
-        sname: "{{ parts[0] }}"
-        active: "{{ (parts[1] | default('')) in ['true', 't'] }}"
-        mb: "{{ parts[2] | default('-') }}"
-        wal_big: "{{ mb != '-' and (mb | int) >= (wal_warn_mb | int) }}"
-        msg: "slot {{ sname }}: active={{ 'yes' if active else 'NO' }}, WAL held back {{ (mb ~ ' MB') if mb != '-' else 'n/a' }}{{ ' (>= ' ~ wal_warn_mb ~ ' MB: the consumer is not advancing the slot; for Debezium see heartbeat.interval.ms and heartbeat.action.query)' if wal_big else '' }}{{ ' - INACTIVE slot: Postgres keeps WAL forever and can fill the disk' if not active else '' }}"
-      loop: "{{ pg_slots.stdout_lines if pg_slots.rc == 0 else [] }}"
 
     - name: Database report
       ansible.builtin.debug:
         msg: "{{ probe_lines | default([]) + extra }}"
       vars:
         missing: "{{ expected_dbs | difference(pg_dbs.stdout_lines) if pg_dbs.rc == 0 else [] }}"
-        conn_used: "{{ pg_conn.stdout | regex_findall('^([0-9]+)[|]', multiline=True) | first | default(0) | int }}"
-        conn_max: "{{ pg_conn.stdout | regex_findall('[|]([0-9]+)$', multiline=True) | first | default(0) | int }}"
+        slot_lines: "{{ pg_slots.stdout_lines if pg_slots.rc == 0 else ['could not read replication slots: ' ~ (pg_slots.stdout | trim)] }}"
         extra:
           - "pg_isready: {{ pg_ready.stdout | trim }}"
           - "databases: {{ pg_dbs.stdout_lines | join(', ') if pg_dbs.rc == 0 else 'could not list (' ~ (pg_dbs.stdout | trim) ~ ')' }}{{ '  MISSING: ' ~ (missing | join(', ')) if missing | length > 0 else '' }}"
-          - "connections: {{ (conn_used ~ ' of ' ~ conn_max ~ ' in use (' ~ ((conn_used * 100 // conn_max) if conn_max > 0 else 0) ~ '%)') if conn_max > 0 else ('could not read: ' ~ (pg_conn.stdout | trim)) }}"
-          - "replication slots: {{ slot_msgs | default(['none found']) }}"
+          - "connections: {{ pg_conn.stdout | trim }}   (12 services x HikariCP max 30 can exceed a default limit of 100)"
+          - "replication slots: {{ slot_lines }}"
+          - "{{ 'WARNING: an INACTIVE replication slot makes Postgres keep WAL forever and can fill the disk' if (pg_slots.stdout is search('active=f')) else 'no inactive replication slot' }}"
 
     - name: Record database results
       ansible.builtin.set_fact:
         host_problems: "{{ (probe_bad | default([])) + (['missing database: ' ~ (missing | join(', '))] if missing | length > 0 else []) + (['pg_isready got no response'] if isready == 'DOWN' else []) }}"
-        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, 'Database', 'pg_isready', isready, pg_ready.stdout | trim], [inventory_hostname, 'Database', 'Databases exist', ('MISSING' if missing | length > 0 else ('OK' if pg_dbs.rc == 0 else 'INFO')), (pg_dbs.stdout_lines | join(', ')) ~ (('  MISSING: ' ~ (missing | join(', '))) if missing | length > 0 else '')], [inventory_hostname, 'Database', 'Connections', conn_status, conn_txt]] }}"
+        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, 'Database', 'pg_isready', isready, pg_ready.stdout | trim], [inventory_hostname, 'Database', 'Databases exist', ('MISSING' if missing | length > 0 else ('OK' if pg_dbs.rc == 0 else 'INFO')), (pg_dbs.stdout_lines | join(', ')) ~ (('  MISSING: ' ~ (missing | join(', '))) if missing | length > 0 else '')], [inventory_hostname, 'Database', 'Connections', 'INFO', pg_conn.stdout | trim], [inventory_hostname, 'Database', 'Replication slots', ('WARN' if (pg_slots.stdout is search('active=f')) else 'OK'), pg_slots.stdout_lines | join(' ;; ') or 'none']] }}"
       vars:
         missing: "{{ expected_dbs | difference(pg_dbs.stdout_lines) if pg_dbs.rc == 0 else [] }}"
         isready: "{{ 'UP' if (pg_ready.stdout is search('accepting connections')) else ('INFO' if (pg_ready.stdout is search('not installed')) else 'DOWN') }}"
-        conn_used: "{{ pg_conn.stdout | regex_findall('^([0-9]+)[|]', multiline=True) | first | default(0) | int }}"
-        conn_max: "{{ pg_conn.stdout | regex_findall('[|]([0-9]+)$', multiline=True) | first | default(0) | int }}"
-        conn_pct: "{{ (conn_used * 100 // conn_max) if conn_max > 0 else 0 }}"
-        conn_status: "{{ 'INFO' if conn_max == 0 else ('WARN' if (conn_pct | int) >= (conn_warn_pct | int) else 'OK') }}"
-        conn_txt: "{{ (conn_used ~ ' of ' ~ conn_max ~ ' connections in use (' ~ conn_pct ~ '%)') if conn_max > 0 else ('could not read: ' ~ (pg_conn.stdout | trim)) }}"
 
     - name: Uptime
       ansible.builtin.command: uptime -p
@@ -381,10 +347,10 @@
   ignore_unreachable: true
   vars:
     infra_components:
-      - { tier: Tools, name: Jenkins,       units: [jenkins],        port: 8080, critical: false }
-      - { tier: Tools, name: Kibana,        units: [kibana],         port: 5602, critical: false }
-      - { tier: Tools, name: Grafana,       units: [grafana-server], port: 3000, critical: false }
-      - { tier: Tools, name: Elasticsearch, units: [elasticsearch],  port: 9200, critical: false }
+      - { tier: Tools, name: Jenkins,       units: [jenkins],                 port: 8080, critical: false }
+      - { tier: Tools, name: Kibana,        units: [kibana],                  port: 5602, critical: false }
+      - { tier: Tools, name: Grafana,       units: [grafana-server, grafana], port: 3000, critical: false }
+      - { tier: Tools, name: Elasticsearch, units: [elasticsearch],           port: 9200, critical: false, optional: true }
     hot: |-
       {% set ns = namespace(h=[]) -%}
       {% for l in df.stdout_lines[1:] -%}
@@ -397,11 +363,6 @@
     reboot_txt: "{{ 'REBOOT REQUIRED (pending updates). After a reboot ALL services cold-start at once: see runbook section D.' if (reboot_req.stat.exists | default(false)) else 'no reboot pending' }}"
     disk_txt: "{{ ('Filesystems at or above ' ~ (disk_warn_pct | default(85)) ~ '%: ' ~ hot) if hot | length > 0 else ('all filesystems below ' ~ (disk_warn_pct | default(85)) ~ '%') }}"
   tasks:
-    - name: Mark this host as checked (the report covers ONLY these hosts, never the whole dynamic inventory)
-      ansible.builtin.group_by:
-        key: finedge_health_checked
-      changed_when: false
-
     - name: Listening TCP ports
       ansible.builtin.command: ss -ltn
       register: ss
@@ -444,12 +405,11 @@
         sub: "{{ out | regex_findall('SUB=([a-z-]+)') | first | default('?') }}"
         enabled: "{{ out | regex_findall('ENABLED=([a-z-]+)') | first | default('unknown') }}"
         since: "{{ out | regex_findall('SINCE=(.*)') | first | default('') }}"
-        has_port: "{{ comp.port is defined }}"
-        port_up: "{{ (ss.stdout is search(':' ~ comp.port ~ ' ')) if has_port else true }}"
-        verdict: "{{ 'UP' if ((unit != 'none' and active == 'active' and port_up) or (unit == 'none' and has_port and port_up)) else ('ABSENT' if (unit == 'none' and (comp.optional | default(false))) else 'DOWN') }}"
+        port_up: "{{ ss.stdout is search(':' ~ comp.port ~ ' ') }}"
+        verdict: "{{ 'UP' if ((unit != 'none' and active == 'active' and port_up) or (unit == 'none' and port_up)) else ('ABSENT' if (unit == 'none' and (comp.optional | default(false))) else 'DOWN') }}"
         tag: "{{ '[ UP ]' if verdict == 'UP' else ('[ -- ]' if verdict == 'ABSENT' else '[DOWN]') }}"
-        port_txt: "{{ ('port ' ~ comp.port ~ (' listening' if port_up else ' NOT listening')) if has_port else 'no port to check' }}"
-        detail: "{{ ('systemd ' ~ unit ~ ' is ' ~ active ~ ' (' ~ sub ~ '), enabled=' ~ enabled ~ (', since ' ~ since if since else '') ~ '; ' ~ port_txt) if unit != 'none' else ('no systemd unit found (tried ' ~ (comp.units | join(', ')) ~ '); ' ~ port_txt ~ (' - running outside systemd (Docker or manual?)' if (has_port and port_up) else '')) }}"
+        port_txt: "{{ 'port ' ~ comp.port ~ (' listening' if port_up else ' NOT listening') }}"
+        detail: "{{ ('systemd ' ~ unit ~ ' is ' ~ active ~ ' (' ~ sub ~ '), enabled=' ~ enabled ~ (', since ' ~ since if since else '') ~ '; ' ~ port_txt) if unit != 'none' else ('no systemd unit found (tried ' ~ (comp.units | join(', ')) ~ '); ' ~ port_txt ~ (' - running outside systemd (Docker or manual?)' if port_up else '')) }}"
         note: "{{ '  (non-critical)' if (verdict == 'DOWN' and not (comp.critical | default(true))) else ('  (not present, fine if unused)' if verdict == 'ABSENT' else '') }}"
         line: "{{ tag }} {{ comp.name }}: {{ detail }}{{ note }}"
       loop: "{{ range(infra_components | length) | list }}"
@@ -503,49 +463,29 @@
   ignore_errors: true
   ignore_unreachable: true
   vars:
-    # Supervisor program names exactly as in /etc/supervisor/conf.d on the server. port = what it listens on.
-    # eureka = the name it registers with in Eureka (spring.application.name, upper case; the registry itself does not register).
-    # subscription-service is NOT here: it has no conf on this server. It shows up below under "remote services" via Eureka.
+    # Supervisor program names exactly as in /etc/supervisor/conf.d on the server. Port = what that service listens on.
+    # subscription-service is NOT here: it has no conf on this server (it runs elsewhere).
     backend_services:
-      - { name: service-registry,           port: 8761, eureka: '' }
-      - { name: api-gateway,                port: 8765, eureka: API-GATEWAY }
-      - { name: admin-service,              port: 8080, eureka: ADMIN-SETUP-SERVICE }
-      - { name: banking-operations-service, port: 8081, eureka: BANKING-SERVICE }
-      - { name: customer-service,           port: 8082, eureka: CUSTOMER-SERVICE }
-      - { name: deposit-service,            port: 8083, eureka: DEPOSIT-SERVICE }
-      - { name: sms-email-service,          port: 8084, eureka: SMS-EMAIL-SERVICE }
-      - { name: loan-service,               port: 8085, eureka: LOAN-SERVICE }
-      - { name: auth-service,               port: 8086, eureka: AUTH-SERVICE }
-      - { name: placement-service,          port: 8087, eureka: PLACEMENT-SERVICE }
-      - { name: card-service,               port: 8089, eureka: CARD-SERVICE }
-      - { name: audit-query-service,        port: 8090, eureka: AUDIT-QUERY-SERVICE }
-      - { name: foreign-exchange-service,   port: 8091, eureka: FOREIGN-EXCHANGE }
+      - { name: service-registry,           port: 8761 }
+      - { name: api-gateway,                port: 8765 }
+      - { name: admin-service,              port: 8080 }
+      - { name: banking-operations-service, port: 8081 }
+      - { name: customer-service,           port: 8082 }
+      - { name: deposit-service,            port: 8083 }
+      - { name: sms-email-service,          port: 8084 }
+      - { name: loan-service,               port: 8085 }
+      - { name: auth-service,               port: 8086 }
+      - { name: placement-service,          port: 8087 }
+      - { name: card-service,               port: 8089 }
+      - { name: audit-query-service,        port: 8090 }
+      - { name: foreign-exchange-service,   port: 8091 }
 
-    # systemd units (names confirmed on the server)
     infra_components:
-      - { tier: Messaging / cache, name: Redis,                         units: [redis-server],    port: 6379,  critical: true }
-      - { tier: Messaging / cache, name: Schema Registry,               units: [schema-registry], port: 18081, critical: true }
-      - { tier: Messaging / cache, name: Debezium Connect (kafka-connect), units: [kafka-connect], port: 18083, critical: true }
-      - { tier: Messaging / cache, name: Docker engine,                 units: [docker],                       critical: true }
-
-    # docker containers (Kafka runs here in KRaft mode: there is no kafka systemd unit and no ZooKeeper)
-    docker_components:
-      - { tier: Messaging / cache, name: Kafka (KRaft),  container: kafka-kraft,  port: 9092, critical: true }
-      - { tier: Tools,             name: Kafka UI,       container: kafka-ui,     port: 9090, critical: false }
-      - { tier: Tools,             name: RedisInsight,   container: redisinsight, port: 5540, critical: false }
-
-    eu_ok: "{{ eureka.json is defined }}"
-    raw_apps: "{{ ((eureka.json | default({})).applications | default({})).application | default([]) }}"
-    eu_apps: "{{ [raw_apps] if raw_apps is mapping else raw_apps }}"
-    eu_lines: |-
-      {% set ns = namespace(l=[]) -%}
-      {% for a in eu_apps -%}
-      {% set insts = [a.instance] if a.instance is mapping else a.instance -%}
-      {% for i in insts -%}
-      {% set ns.l = ns.l + [a.name ~ '|' ~ (i.status | default('?')) ~ '|' ~ (i.ipAddr | default('?')) ~ ':' ~ ((i.port | default({}))['$'] | default('?'))] -%}
-      {% endfor -%}
-      {% endfor -%}
-      {{ ns.l }}
+      - { tier: Messaging / cache, name: Redis,            units: [redis-server, redis],                       port: 6379,  critical: true }
+      - { tier: Messaging / cache, name: Kafka,            units: [kafka, confluent-kafka, kafka-server],      port: 9092,  critical: true }
+      - { tier: Messaging / cache, name: ZooKeeper,        units: [zookeeper, confluent-zookeeper],            port: 2181,  critical: false, optional: true }
+      - { tier: Messaging / cache, name: Schema Registry,  units: [confluent-schema-registry, schema-registry], port: 18081, critical: true }
+      - { tier: Messaging / cache, name: Debezium Connect, units: [confluent-kafka-connect, kafka-connect, connect-distributed, debezium, debezium-connect], port: 18083, critical: true }
     hot: |-
       {% set ns = namespace(h=[]) -%}
       {% for l in df.stdout_lines[1:] -%}
@@ -558,11 +498,6 @@
     reboot_txt: "{{ 'REBOOT REQUIRED (pending updates). After a reboot ALL services cold-start at once: see runbook section D.' if (reboot_req.stat.exists | default(false)) else 'no reboot pending' }}"
     disk_txt: "{{ ('Filesystems at or above ' ~ (disk_warn_pct | default(85)) ~ '%: ' ~ hot) if hot | length > 0 else ('all filesystems below ' ~ (disk_warn_pct | default(85)) ~ '%') }}"
   tasks:
-    - name: Mark this host as checked (the report covers ONLY these hosts, never the whole dynamic inventory)
-      ansible.builtin.group_by:
-        key: finedge_health_checked
-      changed_when: false
-
     - name: Supervisor status of every program
       ansible.builtin.command: supervisorctl status
       register: sup
@@ -575,39 +510,22 @@
       changed_when: false
       failed_when: false
 
-    - name: Eureka registrations
-      ansible.builtin.uri:
-        url: http://127.0.0.1:8761/eureka/apps
-        headers:
-          Accept: application/json
-        timeout: 10
-      register: eureka
-      ignore_errors: true
-      when: ss.stdout is search(':8761 ')
-
-    # ---------- 1. backend services: Supervisor state + port + Eureka ----------
+    # ---------- 1. backend services: Supervisor state + port ----------
     - name: Service report
       ansible.builtin.set_fact:
         svc_lines: "{{ svc_lines | default([]) + [line] }}"
         svc_up: "{{ svc_up | default([]) + ([svc_item.name] if verdict == 'UP' else []) }}"
         svc_wait: "{{ svc_wait | default([]) + ([svc_item.name] if verdict == 'STARTING' else []) }}"
         svc_bad: "{{ svc_bad | default([]) + ([svc_item.name] if verdict == 'DOWN' else []) }}"
-        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, 'Backend service', svc_item.name, ('WAIT' if verdict == 'STARTING' else verdict), state ~ (' (' ~ detail ~ ')' if detail else '') ~ ' | port ' ~ svc_item.port ~ (' listening' if port_up else ' NOT listening') ~ ' | eureka ' ~ eu_state ~ (' at ' ~ eu_addr if eu_addr else '')]] }}"
+        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, 'Backend service', svc_item.name, ('WAIT' if verdict == 'STARTING' else verdict), state ~ (' (' ~ detail ~ ')' if detail else '') ~ ' | port ' ~ svc_item.port ~ (' listening' if port_up else ' NOT listening')]] }}"
       vars:
         state: "{{ sup.stdout | default('') | regex_findall('^' ~ svc_item.name ~ ' +([A-Z]+)', multiline=True) | first | default('NOT-IN-SUPERVISOR') }}"
         detail: "{{ sup.stdout | default('') | regex_findall('^' ~ svc_item.name ~ ' +[A-Z]+ +(.*)$', multiline=True) | first | default('') }}"
         port_up: "{{ ss.stdout is search(':' ~ svc_item.port ~ ' ') }}"
-        grace: "{{ detail is search('uptime 0:0[0-4]:') }}"
-        has_eu: "{{ (svc_item.eureka | default('') | length) > 0 and eu_ok }}"
-        eu_txt: "{{ (eu_lines | select('match', '^' ~ svc_item.eureka ~ '[|]') | list | first | default('')) if has_eu else '' }}"
-        eu_state: "{{ 'n/a' if not has_eu else ('MISSING' if eu_txt == '' else eu_txt.split('|')[1]) }}"
-        eu_addr: "{{ eu_txt.split('|')[2] if eu_txt else '' }}"
-        eu_bad: "{{ eu_state not in ['UP', 'n/a'] }}"
-        healthy: "{{ state == 'RUNNING' and port_up and not eu_bad }}"
-        verdict: "{{ 'UP' if healthy else ('STARTING' if (state == 'STARTING' or (state == 'RUNNING' and grace)) else 'DOWN') }}"
+        recent: "{{ detail is search('uptime 0:0[01]:') }}"
+        verdict: "{{ 'UP' if (state == 'RUNNING' and port_up) else ('STARTING' if ((state == 'RUNNING' and recent) or state == 'STARTING') else 'DOWN') }}"
         tag: "{{ '[ UP ]' if verdict == 'UP' else ('[WAIT]' if verdict == 'STARTING' else '[DOWN]') }}"
-        hint: "{{ '  <- RUNNING but not listening: hung, or wrong port in this playbook' if (state == 'RUNNING' and not port_up and verdict == 'DOWN') else ('  <- running and listening, but ' ~ eu_state ~ ' in Eureka: the gateway cannot route to it' if (state == 'RUNNING' and port_up and eu_bad and verdict == 'DOWN') else '') }}"
-        line: "{{ tag }} {{ svc_item.name }}: {{ state }}{{ ' (' ~ detail ~ ')' if detail else '' }} | port {{ svc_item.port }} {{ 'listening' if port_up else 'NOT listening' }} | eureka {{ eu_state }}{{ hint }}"
+        line: "{{ tag }} {{ svc_item.name }}: {{ state }}{{ ' (' ~ detail ~ ')' if detail else '' }} | port {{ svc_item.port }} {{ 'listening' if port_up else 'NOT listening' }}{{ '  <- RUNNING but not listening: hung, or wrong port in this playbook' if (state == 'RUNNING' and not port_up and verdict == 'DOWN') else '' }}"
       loop: "{{ backend_services }}"
       loop_control:
         loop_var: svc_item
@@ -625,25 +543,6 @@
         present: "{{ (sup.stdout_lines | default([])) | map('regex_replace', ' .*$', '') | reject('equalto', '') | list }}"
         extra: "{{ present | difference(known) }}"
       when: extra | length > 0
-
-    # ---------- 2. services Eureka knows about that do NOT run on this server ----------
-    - name: Remote services seen in Eureka
-      ansible.builtin.set_fact:
-        remote_lines: "{{ remote_lines | default([]) + [rline] }}"
-        remote_bad: "{{ remote_bad | default([]) + ([parts[0]] if parts[1] != 'UP' else []) }}"
-        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, 'Backend service (remote)', parts[0], ('UP' if parts[1] == 'UP' else 'DOWN'), 'registered in Eureka as ' ~ parts[1] ~ ' at ' ~ parts[2] ~ ' (not a Supervisor program on this server)']] }}"
-      vars:
-        parts: "{{ eu_line.split('|') }}"
-        rline: "{{ '[ UP ]' if parts[1] == 'UP' else '[DOWN]' }} {{ parts[0] }} runs elsewhere: Eureka says {{ parts[1] }} at {{ parts[2] }}"
-      loop: "{{ eu_lines | reject('match', '^(' ~ (backend_services | map(attribute='eureka') | reject('equalto', '') | join('|')) ~ ')[|]') | list }}"
-      loop_control:
-        loop_var: eu_line
-        label: "{{ eu_line }}"
-
-    - name: Remote services report
-      ansible.builtin.debug:
-        msg: "{{ remote_lines }}"
-      when: remote_lines | default([]) | length > 0
 
     - name: Probe systemd units
       ansible.builtin.shell: |
@@ -681,59 +580,17 @@
         sub: "{{ out | regex_findall('SUB=([a-z-]+)') | first | default('?') }}"
         enabled: "{{ out | regex_findall('ENABLED=([a-z-]+)') | first | default('unknown') }}"
         since: "{{ out | regex_findall('SINCE=(.*)') | first | default('') }}"
-        has_port: "{{ comp.port is defined }}"
-        port_up: "{{ (ss.stdout is search(':' ~ comp.port ~ ' ')) if has_port else true }}"
-        verdict: "{{ 'UP' if ((unit != 'none' and active == 'active' and port_up) or (unit == 'none' and has_port and port_up)) else ('ABSENT' if (unit == 'none' and (comp.optional | default(false))) else 'DOWN') }}"
+        port_up: "{{ ss.stdout is search(':' ~ comp.port ~ ' ') }}"
+        verdict: "{{ 'UP' if ((unit != 'none' and active == 'active' and port_up) or (unit == 'none' and port_up)) else ('ABSENT' if (unit == 'none' and (comp.optional | default(false))) else 'DOWN') }}"
         tag: "{{ '[ UP ]' if verdict == 'UP' else ('[ -- ]' if verdict == 'ABSENT' else '[DOWN]') }}"
-        port_txt: "{{ ('port ' ~ comp.port ~ (' listening' if port_up else ' NOT listening')) if has_port else 'no port to check' }}"
-        detail: "{{ ('systemd ' ~ unit ~ ' is ' ~ active ~ ' (' ~ sub ~ '), enabled=' ~ enabled ~ (', since ' ~ since if since else '') ~ '; ' ~ port_txt) if unit != 'none' else ('no systemd unit found (tried ' ~ (comp.units | join(', ')) ~ '); ' ~ port_txt ~ (' - running outside systemd (Docker or manual?)' if (has_port and port_up) else '')) }}"
+        port_txt: "{{ 'port ' ~ comp.port ~ (' listening' if port_up else ' NOT listening') }}"
+        detail: "{{ ('systemd ' ~ unit ~ ' is ' ~ active ~ ' (' ~ sub ~ '), enabled=' ~ enabled ~ (', since ' ~ since if since else '') ~ '; ' ~ port_txt) if unit != 'none' else ('no systemd unit found (tried ' ~ (comp.units | join(', ')) ~ '); ' ~ port_txt ~ (' - running outside systemd (Docker or manual?)' if port_up else '')) }}"
         note: "{{ '  (non-critical)' if (verdict == 'DOWN' and not (comp.critical | default(true))) else ('  (not present, fine if unused)' if verdict == 'ABSENT' else '') }}"
         line: "{{ tag }} {{ comp.name }}: {{ detail }}{{ note }}"
       loop: "{{ range(infra_components | length) | list }}"
       loop_control:
         loop_var: idx
         label: "{{ infra_components[idx].name }}"
-
-    - name: Probe docker containers
-      ansible.builtin.shell: |
-        if ! command -v docker >/dev/null 2>&1; then
-          echo "CONTAINER=nodocker"
-        else
-          r=$(docker inspect -f '{% raw %}{{.State.Status}}|{{.HostConfig.RestartPolicy.Name}}|{{.State.StartedAt}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}{% endraw %}' {{ item.container }} 2>/dev/null)
-          if [ -z "$r" ]; then echo "CONTAINER=missing"; else echo "CONTAINER=$r"; fi
-        fi
-      args:
-        executable: /bin/bash
-      register: dprobes
-      changed_when: false
-      failed_when: false
-      loop: "{{ docker_components }}"
-      loop_control:
-        label: "{{ item.container }}"
-
-    - name: Record docker container results
-      ansible.builtin.set_fact:
-        probe_lines: "{{ probe_lines | default([]) + [line] }}"
-        probe_bad: "{{ probe_bad | default([]) + ([comp.name] if (verdict == 'DOWN' and (comp.critical | default(true))) else []) }}"
-        boot_warn: "{{ boot_warn | default([]) + ([comp.name ~ ' (docker container ' ~ comp.container ~ ') has restart policy ' ~ (restart or 'no') ~ ', so it will NOT come back after a reboot'] if (dstate not in ['missing', 'nodocker'] and restart in ['', 'no']) else []) }}"
-        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, comp.tier, comp.name, verdict, detail ~ note]] }}"
-      vars:
-        comp: "{{ docker_components[idx] }}"
-        out: "{{ dprobes.results[idx].stdout | default('CONTAINER=missing') | trim }}"
-        dstate: "{{ out | regex_findall('^CONTAINER=([a-z]+)', multiline=True) | first | default('missing') }}"
-        restart: "{{ out | regex_findall('^CONTAINER=[a-z]+[|]([a-z-]*)[|]', multiline=True) | first | default('') }}"
-        started: "{{ out | regex_findall('^CONTAINER=[a-z]+[|][a-z-]*[|]([^|]*)[|]', multiline=True) | first | default('') }}"
-        health: "{{ out | regex_findall('[|]([a-z]+)$', multiline=True) | first | default('none') }}"
-        port_up: "{{ ss.stdout is search(':' ~ comp.port ~ ' ') }}"
-        verdict: "{{ 'UP' if (dstate == 'running' and health != 'unhealthy' and port_up) else 'DOWN' }}"
-        tag: "{{ '[ UP ]' if verdict == 'UP' else '[DOWN]' }}"
-        detail: "{{ ('docker container ' ~ comp.container ~ ' is ' ~ dstate ~ ' (restart=' ~ (restart or 'no') ~ ', health=' ~ health ~ ', since ' ~ started[:19] ~ ' UTC); port ' ~ comp.port ~ (' listening' if port_up else ' NOT listening')) if dstate not in ['missing', 'nodocker'] else ('docker container ' ~ comp.container ~ (' not found' if dstate == 'missing' else ' - docker is not installed')) }}"
-        note: "{{ '  (non-critical)' if (verdict == 'DOWN' and not (comp.critical | default(true))) else '' }}"
-        line: "{{ tag }} {{ comp.name }}: {{ detail }}{{ note }}"
-      loop: "{{ range(docker_components | length) | list }}"
-      loop_control:
-        loop_var: idx
-        label: "{{ docker_components[idx].container }}"
 
     - name: PostgreSQL reachable from this host
       ansible.builtin.wait_for:
@@ -749,7 +606,7 @@
       vars:
         db_line: "{{ '[ UP ] PostgreSQL 172.20.250.9:5432 is reachable from this host' if not (db_reach.failed | default(false)) else '[DOWN] PostgreSQL 172.20.250.9:5432 is NOT reachable from this host' }}"
 
-    - name: Units and containers that will not come back after a reboot
+    - name: Units that will not come back after a reboot
       ansible.builtin.debug:
         msg: "{{ boot_warn }}"
       when: boot_warn | default([]) | length > 0
@@ -784,21 +641,41 @@
       ignore_errors: true
       when: ss.stdout is search(':18083 ')
 
+    - name: Eureka registrations
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8761/eureka/apps
+        headers:
+          Accept: application/json
+        timeout: 10
+      register: eureka
+      ignore_errors: true
+      when: ss.stdout is search(':8761 ')
+
     - name: Deeper checks
       ansible.builtin.debug:
         msg:
           - "Redis PING reply: {{ ping_txt }}   (+PONG is fine; -NOAUTH also means Redis is alive)"
           - "Schema Registry /subjects: {{ sr_txt }}"
           - "Debezium license-audit-outbox-connector: {{ dbz_txt }}"
-          - "Eureka: {{ eu_lines | length }} instances registered{{ '' if not_up | length == 0 else '; NOT UP: ' ~ (not_up | join(', ')) }}"
       vars:
         ping_txt: "{{ (redis_ping.stdout | default('') | trim) or 'no reply' }}"
         sr_txt: "{{ 'answers' if (sr.status | default(0)) == 200 else 'no answer' }}"
         dbz_txt: "connector={{ ((dbz.json | default({})).connector | default({})).state | default('unreachable') }} tasks={{ ((dbz.json | default({})).tasks | default([])) | map(attribute='state') | list }}"
-        not_up: "{{ eu_lines | reject('search', '[|]UP[|]') | list }}"
 
-    # ---------- 4. every container on the host (sandbox lives here) ----------
-    - name: All docker containers
+    - name: Eureka report (every instance should be UP)
+      ansible.builtin.debug:
+        msg: "{{ app.name }}: {{ ([app.instance] if app.instance is mapping else app.instance) | map(attribute='status') | list }}"
+      vars:
+        raw_apps: "{{ ((eureka.json | default({})).applications | default({})).application | default([]) }}"
+        apps: "{{ [raw_apps] if raw_apps is mapping else raw_apps }}"
+      loop: "{{ apps }}"
+      loop_control:
+        loop_var: app
+        label: "{{ app.name }}"
+      when: eureka.json is defined
+
+    # ---------- 4. docker (sandbox containers etc.) ----------
+    - name: Docker containers
       ansible.builtin.shell: |
         if command -v docker >/dev/null 2>&1; then
           docker ps -a --format '{% raw %}{{.Names}} | {{.Status}} | {{.Ports}}{% endraw %}'
@@ -809,20 +686,30 @@
       changed_when: false
       failed_when: false
 
-    - name: Docker report
+    - name: Docker report (sandbox lives here)
       ansible.builtin.debug:
         msg: "{{ dock.stdout_lines if dock.stdout_lines | length > 0 else ['no containers'] }}"
 
     - name: Record backend extras for the report
       ansible.builtin.set_fact:
-        host_problems: "{{ (svc_bad | default([])) + (probe_bad | default([])) + (remote_bad | default([])) + (['PostgreSQL unreachable from this host'] if db_bad else []) }}"
-        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, 'Database', 'PostgreSQL reachable from backend', ('DOWN' if db_bad else 'UP'), '172.20.250.9:5432'], [inventory_hostname, 'Messaging / cache', 'Redis PING', ('UP' if (ping_txt is search('PONG|NOAUTH')) else 'INFO'), ping_txt], [inventory_hostname, 'Messaging / cache', 'Schema Registry /subjects', ('UP' if (sr.status | default(0)) == 200 else 'INFO'), sr_txt], [inventory_hostname, 'Messaging / cache', 'Debezium connector', ('UP' if (dbz_state == 'RUNNING') else 'WARN'), 'license-audit-outbox-connector state=' ~ dbz_state], [inventory_hostname, 'Messaging / cache', 'Eureka registrations', ('OK' if not_up | length == 0 else 'WARN'), (eu_lines | length | string) ~ ' instances registered' ~ ((';  NOT UP: ' ~ (not_up | join(', '))) if not_up | length > 0 else '')], [inventory_hostname, 'Docker', 'All containers', 'INFO', (dock.stdout_lines | join(' ;; ')) or 'no containers']] }}"
+        host_problems: "{{ (svc_bad | default([])) + (probe_bad | default([])) + (['PostgreSQL unreachable from this host'] if db_bad else []) }}"
+        report_rows: "{{ report_rows | default([]) + [[inventory_hostname, 'Database', 'PostgreSQL reachable from backend', ('DOWN' if db_bad else 'UP'), '172.20.250.9:5432'], [inventory_hostname, 'Messaging / cache', 'Redis PING', ('UP' if (ping_txt is search('PONG|NOAUTH')) else 'INFO'), ping_txt], [inventory_hostname, 'Messaging / cache', 'Schema Registry /subjects', ('UP' if (sr.status | default(0)) == 200 else 'INFO'), sr_txt], [inventory_hostname, 'Messaging / cache', 'Debezium connector', ('UP' if (dbz_state == 'RUNNING') else 'WARN'), 'license-audit-outbox-connector state=' ~ dbz_state], [inventory_hostname, 'Messaging / cache', 'Eureka registrations', ('OK' if eureka_not_up | length == 0 else 'WARN'), (apps | length | string) ~ ' apps registered' ~ ((';  not all UP: ' ~ eureka_not_up) if eureka_not_up | length > 0 else '')], [inventory_hostname, 'Docker', 'Containers', 'INFO', (dock.stdout_lines | join(' ;; ')) or 'no containers']] }}"
       vars:
         db_bad: "{{ db_reach.failed | default(false) }}"
         ping_txt: "{{ (redis_ping.stdout | default('') | trim) or 'no reply' }}"
         sr_txt: "{{ 'answers' if (sr.status | default(0)) == 200 else 'no answer' }}"
         dbz_state: "{{ ((dbz.json | default({})).connector | default({})).state | default('unreachable') }}"
-        not_up: "{{ eu_lines | reject('search', '[|]UP[|]') | list }}"
+        raw_apps: "{{ ((eureka.json | default({})).applications | default({})).application | default([]) }}"
+        apps: "{{ [raw_apps] if raw_apps is mapping else raw_apps }}"
+        eureka_not_up: |-
+          {% set ns = namespace(n=[]) -%}
+          {% for a in apps -%}
+          {% set insts = [a.instance] if a.instance is mapping else a.instance -%}
+          {% if (insts | rejectattr('status', 'equalto', 'UP') | list | length) > 0 -%}
+          {% set ns.n = ns.n + [a.name] -%}
+          {% endif -%}
+          {% endfor -%}
+          {{ ns.n | join(', ') }}
 
     - name: Uptime
       ansible.builtin.command: uptime -p
@@ -859,7 +746,7 @@
         report_rows: "{{ report_rows | default([]) + [[inventory_hostname, 'Host', 'Uptime / memory', 'INFO', (up_p.stdout | default('n/a')) ~ ' | memory ' ~ (mem.stdout | default('n/a'))], [inventory_hostname, 'Host', 'Reboot pending', ('WARN' if (reboot_req.stat.exists | default(false)) else 'OK'), reboot_txt], [inventory_hostname, 'Host', 'Disk usage', ('WARN' if hot | length > 0 else 'OK'), disk_txt]] }}"
 
 # ======================= Play 5: build and publish the Excel report =======================
-# Runs on the "report host" (default: the cicd_hosts host = the Jenkins server). Skipped if it is not in the inventory.
+# Runs on the "report host" (default: the cicd_hosts host, i.e. the Jenkins server). Skipped if that group/host is not in the inventory.
 - name: FinEdge | Health - Excel report
   hosts: "{{ report_host | default(cicd_hosts | default('finedge_cicd')) }}"
   become: true
@@ -872,19 +759,13 @@
     report_owner: jenkins
     report_keep_days: 14
   tasks:
-    - name: Mark this host as the report builder
-      ansible.builtin.group_by:
-        key: finedge_health_reporter
-      changed_when: false
-
-    - name: Gather the rows reported by the checked hosts
+    - name: Gather the rows reported by every host
       ansible.builtin.set_fact:
-        all_rows: "{{ all_rows | default([]) + (hostvars[h].report_rows | default([[h, 'Host', 'Reachable', 'DOWN', 'no result from this host (unreachable, or every check failed)']])) }}"
-        all_problems: "{{ all_problems | default([]) + ([h ~ ': ' ~ (hostvars[h].host_problems | join(', '))] if (hostvars[h].host_problems | default([]) | length > 0) else ([] if hostvars[h].report_rows is defined else [h ~ ': no result (unreachable?)'])) }}"
-      loop: "{{ groups['finedge_health_checked'] | default([]) }}"
+        all_rows: "{{ all_rows | default([]) + (hostvars[h].report_rows | default([])) }}"
+        all_problems: "{{ all_problems | default([]) + ([h ~ ': ' ~ (hostvars[h].host_problems | join(', '))] if (hostvars[h].host_problems | default([]) | length > 0) else []) }}"
+      loop: "{{ hostvars.keys() | list }}"
       loop_control:
         loop_var: h
-        label: "{{ h }}"
 
     - name: Work out the summary
       ansible.builtin.set_fact:
@@ -900,10 +781,9 @@
                 - ['UP / OK', "{{ (all_rows | default([]) | selectattr('3', 'in', ['UP', 'OK']) | list | length) }}"]
                 - ['DOWN / MISSING', "{{ (all_rows | default([]) | selectattr('3', 'in', ['DOWN', 'MISSING']) | list | length) }}"]
                 - ['WAIT / WARN', "{{ (all_rows | default([]) | selectattr('3', 'in', ['WAIT', 'WARN']) | list | length) }}"]
-                - ['Reports folder', "{{ report_url_base }}/"]
             - name: Details
               header: [Host, Tier, Component, Status, Detail]
-              widths: [20, 22, 38, 11, 130]
+              widths: [20, 20, 34, 11, 130]
               rows: "{{ all_rows | default([]) }}"
 
     - name: Report folder
@@ -1034,9 +914,8 @@
           def main():
               rows_json, outdir, keep_days = sys.argv[1], sys.argv[2], int(sys.argv[3])
               data = json.load(open(rows_json))
-              wat = datetime.timezone(datetime.timedelta(hours=1))   # Lagos (WAT, UTC+1, no daylight saving). The servers themselves run on New York time.
-              now = datetime.datetime.now(wat)
-              data['sheets'][0]['rows'].insert(0, ['Generated (Lagos time, WAT)', now.strftime('%Y-%m-%d %H:%M:%S')])
+              now = datetime.datetime.now()
+              data['sheets'][0]['rows'].insert(0, ['Generated (server time)', now.strftime('%Y-%m-%d %H:%M:%S')])
               os.makedirs(outdir, exist_ok=True)
               stamped = os.path.join(outdir, 'finedge-health-%s.xlsx' % now.strftime('%Y%m%d-%H%M%S'))
               latest = os.path.join(outdir, 'finedge-health-latest.xlsx')
@@ -1079,21 +958,27 @@
       ansible.builtin.set_fact:
         report_url: "{{ report_url_base }}/{{ (rep.stdout | from_json).latest }}"
         report_url_stamped: "{{ report_url_base }}/{{ (rep.stdout | from_json).stamped }}"
-        report_folder_url: "{{ report_url_base }}/"
-        report_server_path: "{{ report_dir }}"
       run_once: true
       when: (rep.rc | default(1)) == 0
 
-    - name: Attach the link to the AWX job
+    - name: Show the AWX job artifact
       ansible.builtin.set_stats:
         data:
           health_report_url: "{{ report_url }}"
-          health_report_folder: "{{ report_folder_url }}"
       run_once: true
       when: (rep.rc | default(1)) == 0
 
-# ======================= Play 6: final result =======================
-- name: FinEdge | Health - FINAL RESULT
+    - name: Report location
+      ansible.builtin.debug:
+        msg:
+          - "EXCEL REPORT (latest): {{ report_url }}"
+          - "This run:              {{ report_url_stamped }}"
+          - "Log in to Jenkins in the same browser first if it asks."
+      run_once: true
+      when: (rep.rc | default(1)) == 0
+
+# ======================= Play 6: summary (and optional failure) =======================
+- name: FinEdge | Health - overall verdict
   hosts: localhost
   connection: local
   become: false
@@ -1101,40 +986,22 @@
   vars:
     fail_on_problems: false
   tasks:
-    - name: Gather results from the checked hosts
+    - name: Gather results
       ansible.builtin.set_fact:
-        all_rows: "{{ all_rows | default([]) + (hostvars[h].report_rows | default([[h, 'Host', 'Reachable', 'DOWN', 'no result from this host (unreachable, or every check failed)']])) }}"
-        all_problems: "{{ all_problems | default([]) + ([h ~ ': ' ~ (hostvars[h].host_problems | join(', '))] if (hostvars[h].host_problems | default([]) | length > 0) else ([] if hostvars[h].report_rows is defined else [h ~ ': no result (unreachable?)'])) }}"
-      loop: "{{ groups['finedge_health_checked'] | default([]) }}"
+        all_rows: "{{ all_rows | default([]) + (hostvars[h].report_rows | default([])) }}"
+        all_problems: "{{ all_problems | default([]) + ([h ~ ': ' ~ (hostvars[h].host_problems | join(', '))] if (hostvars[h].host_problems | default([]) | length > 0) else []) }}"
+        report_urls: "{{ report_urls | default([]) + ([hostvars[h].report_url] if (hostvars[h].report_url is defined) else []) }}"
+      loop: "{{ hostvars.keys() | list }}"
       loop_control:
         loop_var: h
-        label: "{{ h }}"
 
-    - name: Find the report link
-      ansible.builtin.set_fact:
-        report_urls: "{{ report_urls | default([]) + ([hostvars[r].report_url] if (hostvars[r].report_url is defined) else []) }}"
-        report_folders: "{{ report_folders | default([]) + ([hostvars[r].report_folder_url] if (hostvars[r].report_folder_url is defined) else []) }}"
-        report_paths: "{{ report_paths | default([]) + ([hostvars[r].report_server_path] if (hostvars[r].report_server_path is defined) else []) }}"
-      loop: "{{ groups['finedge_health_reporter'] | default([]) }}"
-      loop_control:
-        loop_var: r
-        label: "{{ r }}"
-
-    - name: FINAL RESULT
+    - name: Overall result
       ansible.builtin.debug:
-        msg: "{{ lines }}"
-      vars:
-        has_report: "{{ report_urls | default([]) | length > 0 }}"
-        lines:
-          - "=============================================================="
-          - "OVERALL: {{ 'ALL CHECKED SERVICES HEALTHY' if all_problems | default([]) | length == 0 else 'CRITICAL PROBLEMS' }}"
-          - "{{ all_problems | default([]) | join('   ||   ') if all_problems | default([]) | length > 0 else 'no critical problems' }}"
-          - "HOSTS CHECKED: {{ groups['finedge_health_checked'] | default([]) | join(', ') or 'none' }}"
-          - "{{ ('EXCEL REPORT:  ' ~ (report_urls | first)) if has_report else 'EXCEL REPORT:  not published (no report host in the inventory, or it was unreachable) - full table below' }}"
-          - "{{ ('ALL REPORTS:   ' ~ (report_folders | first)) if has_report else '' }}"
-          - "{{ ('ON THE SERVER: ' ~ (report_paths | first)) if has_report else '' }}"
-          - "(log in to Jenkins in the same browser first. Times in the workbook are Lagos time.)"
-          - "=============================================================="
+        msg: "{{ ['ALL CHECKED SERVICES HEALTHY'] if all_problems | default([]) | length == 0 else ['CRITICAL PROBLEMS:'] + all_problems }}"
+
+    - name: Where is the Excel report
+      ansible.builtin.debug:
+        msg: "{{ ('Excel report: ' ~ (report_urls | first)) if (report_urls | default([]) | length > 0) else 'No Excel report was published (no report host in the inventory, or it was unreachable). Full table below.' }}"
 
     - name: Full table (shown only when no Excel report was published)
       ansible.builtin.debug:
