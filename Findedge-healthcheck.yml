@@ -340,7 +340,7 @@
 
 # ======================= Play 3: CI/CD and monitoring server =======================
 - name: FinEdge | Health - Jenkins, Kibana, Grafana (informational)
-  hosts: "{{ cicd_hosts | default('finedge_cicd') }}"
+  hosts: "{{ cicd_hosts | default('cwgfinECICD') }}"
   become: true
   gather_facts: false
   ignore_errors: true
@@ -748,7 +748,7 @@
 # ======================= Play 5: build and publish the Excel report =======================
 # Runs on the "report host" (default: the cicd_hosts host, i.e. the Jenkins server). Skipped if that group/host is not in the inventory.
 - name: FinEdge | Health - Excel report
-  hosts: "{{ report_host | default(cicd_hosts | default('finedge_cicd')) }}"
+  hosts: "{{ report_host | default(cicd_hosts | default('cwgfinECICD')) }}"
   become: true
   gather_facts: false
   ignore_errors: true
