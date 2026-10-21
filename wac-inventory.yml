@@ -1,14 +1,10 @@
 ---
 - name: Enterprise WAC Inventory Synchronization
-  hosts: wac_gateway
+  hosts: all
   gather_facts: false
   vars:
-    # Change this if you use a specific inventory group name (e.g., "windows_servers") 
-    # instead of evaluating all hosts in the inventory.
-    target_inventory_group: "all"
-    
-    # Exclude your WAC gateway hostname or pattern so it doesn't try to add itself to WAC
-    gateway_hostname_pattern: "wac-gateway" 
+    # Change this to your exact WAC gateway hostname as it appears in your AWX inventory
+    wac_gateway_host: "wac-gateway.yourdomain.local" 
 
     connection_type: "msft.sme.connection-type.server"
     connection_group: "global"
@@ -20,22 +16,30 @@
         Get-WacConnection -ErrorAction SilentlyContinue | Select-Object -ExpandProperty name
       register: wac_raw_connections
       changed_when: false
+      delegate_to: "{{ wac_gateway_host }}"
+      run_once: true
 
     - name: Process and normalize registered server list from WAC
       set_fact:
         registered_servers: "{{ wac_raw_connections.stdout_lines | map('trim') | map('lower') | list }}"
+      run_once: true
 
-    - name: Extract target Windows servers dynamically from AWX inventory
+    - name: Extract all target servers dynamically from AWX inventory context
       set_fact:
-        expected_servers: "{{ groups[target_inventory_group] | reject('match', '.*' + gateway_hostname_pattern + '.*') | map('lower') | list }}"
+        # ansible_play_hosts automatically contains all hosts in your inventory when using hosts: all
+        # We exclude the gateway itself so it doesn't try to add itself as a managed node
+        expected_servers: "{{ ansible_play_hosts | reject('match', '.*' + wac_gateway_host + '.*') | map('lower') | list }}"
+      run_once: true
 
     - name: Compute the difference (Servers missing from WAC)
       set_fact:
         servers_to_add: "{{ expected_servers | difference(registered_servers) }}"
+      run_once: true
 
     - name: End playbook execution early if all servers are already synced
-      meta: end_host
+      meta: end_play
       when: servers_to_add | length == 0
+      run_once: true
 
     - name: Generate bulk CSV batch file on WAC Gateway for the missing servers
       ansible.windows.win_copy:
@@ -46,17 +50,23 @@
           {% endfor %}
         dest: "C:\\Temp\\wac_bulk_sync.csv"
       register: csv_creation
+      delegate_to: "{{ wac_gateway_host }}"
+      run_once: true
 
     - name: Import the missing servers into Windows Admin Center in bulk
       ansible.windows.win_shell: |
         Import-WACConnection -FileName "C:\\Temp\\wac_bulk_sync.csv" -ErrorAction Stop
       register: bulk_import_result
+      delegate_to: "{{ wac_gateway_host }}"
+      run_once: true
 
     - name: Clean up temporary batch file from gateway
       ansible.windows.win_file:
         path: "C:\\Temp\\wac_bulk_sync.csv"
         state: absent
       when: csv_creation is succeeded
+      delegate_to: "{{ wac_gateway_host }}"
+      run_once: true
 
     - name: Log synchronization summary results
       debug:
@@ -64,3 +74,4 @@
           - "Total servers evaluated from AWX inventory: {{ expected_servers | length }}"
           - "Servers already present in WAC: {{ expected_servers | length - servers_to_add | length }}"
           - "New servers successfully added to WAC: {{ servers_to_add }}"
+      run_once: true
