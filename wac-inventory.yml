@@ -3,8 +3,8 @@
   hosts: all
   gather_facts: false
   vars:
-    # Change this to your exact WAC gateway hostname as it appears in your AWX inventory
-    wac_gateway_host: "wac-gateway.yourdomain.local" 
+    # Your actual WAC server IP address
+    wac_gateway_host: "192.168.122.141" 
 
     connection_type: "msft.sme.connection-type.server"
     connection_group: "global"
@@ -26,9 +26,8 @@
 
     - name: Extract all target servers dynamically from AWX inventory context
       set_fact:
-        # ansible_play_hosts automatically contains all hosts in your inventory when using hosts: all
-        # We exclude the gateway itself so it doesn't try to add itself as a managed node
-        expected_servers: "{{ ansible_play_hosts | reject('match', '.*' + wac_gateway_host + '.*') | map('lower') | list }}"
+        # Excludes the WAC gateway IP/hostname itself from being added as a managed server
+        expected_servers: "{{ ansible_play_hosts | reject('match', '.*(' ~ wac_gateway_host ~ '|wac-server).*') | map('lower') | list }}"
       run_once: true
 
     - name: Compute the difference (Servers missing from WAC)
