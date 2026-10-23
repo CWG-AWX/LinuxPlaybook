@@ -1,6 +1,6 @@
 ---
 - name: Audit and Disable Target Users on Windows
-  hosts: windows
+  hosts: all
   gather_facts: false
   ignore_unreachable: true
   vars:
