@@ -2,23 +2,32 @@
 - name: Audit and Disable Target Users on Windows
   hosts: windows
   gather_facts: false
+  ignore_unreachable: true
   vars:
     target_users:
       - olanrenwaju
       - ferdinand
 
   tasks:
+    - name: Test WinRM connectivity to host
+      ansible.windows.win_ping:
+      register: win_ping_result
+      ignore_unreachable: true
+
     - name: Get all local user accounts
+      when: win_ping_result is succeeded
       ansible.windows.win_shell: |
         Get-LocalUser | Select-Object Name, Enabled | ConvertTo-Json
       register: win_users_raw
       changed_when: false
 
     - name: Parse local users list
+      when: win_ping_result is succeeded
       ansible.builtin.set_fact:
         normal_users: "{{ (win_users_raw.stdout | from_json) | map(attribute='Name') | list }}"
 
     - name: Check and disable target users if present
+      when: win_ping_result is succeeded
       ansible.windows.win_user:
         name: "{{ item }}"
         disabled: true
@@ -28,6 +37,7 @@
       ignore_errors: true
 
     - name: Compile Windows target users status report
+      when: win_ping_result is succeeded
       ansible.builtin.set_fact:
         target_user_report: >-
           {% set report = namespace(data=[]) %}
@@ -41,6 +51,7 @@
           {{ report.data }}
 
     - name: Display Windows User Audit and Action Report
+      when: win_ping_result is succeeded
       ansible.builtin.debug:
         msg: |
           ======================================================================
