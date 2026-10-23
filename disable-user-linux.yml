@@ -1,5 +1,5 @@
 ---
-- name: Audit and Disable Target Users on Linux
+- name: Audit, Disable, and Verify Target Users on Linux
   hosts: all
   gather_facts: false
   ignore_unreachable: true
@@ -11,62 +11,57 @@
   tasks:
     - name: Test connectivity to host
       ansible.builtin.ping:
-      register: ping_result
-      ignore_unreachable: true
-      ignore_errors: true
+        register: ping_result
+        ignore_unreachable: true
+        ignore_errors: true
 
-    - name: Gather normal users (UID >= 1000 and root)
+    - name: Check if target users exist on the server
       when: ping_result is succeeded
-      ansible.builtin.shell: |
-        awk -F: '($3 >= 1000 && $3 < 65534) || $1 == "root" {print $1}' /etc/passwd
-      register: linux_users_raw
-      changed_when: false
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ item }}"
+      loop: "{{ target_users }}"
+      register: user_check
+      failed_when: false
       ignore_errors: true
 
-    - name: Parse normal users list into comma-separated string
-      when: ping_result is succeeded and linux_users_raw.stdout_lines is defined
-      ansible.builtin.set_fact:
-        normal_users_string: "{{ linux_users_raw.stdout_lines | join(', ') }}"
-      ignore_errors: true
-
-    - name: Check and disable target users if present
-      when: ping_result is succeeded
+    - name: Disable target user only if they actually exist
+      when: 
+        - ping_result is succeeded
+        - user_check.results[ansible.loop.index0].failed is not defined or not user_check.results[ansible.loop.index0].failed
       ansible.builtin.user:
         name: "{{ item }}"
         password_lock: true
-        state: present
       loop: "{{ target_users }}"
-      register: user_disable_results
+      register: disable_results
       ignore_errors: true
 
-    - name: Compile target users status report
-      when: ping_result is succeeded and user_disable_results.results is defined
-      ansible.builtin.set_fact:
-        target_user_report: >-
-          {% set report = namespace(data=[]) %}
-          {% for res in user_disable_results.results %}
-            {% if res.failed is defined and res.failed %}
-              {% set report.data = report.data + [res.item ~ ': Target user not found in list'] %}
-            {% else %}
-              {% set report.data = report.data + [res.item ~ ': The user was disabled'] %}
-            {% endif %}
-          {% endfor %}
-          {{ report.data }}
+    - name: Run system status check (passwd -S) on disabled users
+      when: 
+        - ping_result is succeeded
+        - disable_results.results is defined
+      ansible.builtin.shell: "passwd -S {{ item.item }}"
+      loop: "{{ disable_results.results }}"
+      when: 
+        - ping_result is succeeded
+        - item.skipped is not defined or not item.skipped
+        - item.failed is not defined or not item.failed
+      register: status_results
+      changed_when: false
       ignore_errors: true
 
-    - name: Display Linux User Audit and Action Report
-      when: ping_result is succeeded
+    - name: Display report ONLY for servers where users were found and disabled
+      when: 
+        - ping_result is succeeded
+        - status_results.results is defined
+        - status_results.results | length > 0
       ansible.builtin.debug:
         msg: |
           ======================================================================
-          LINUX USER AUDIT & DISABLE REPORT: {{ inventory_hostname }}
+          SUCCESS: TARGET USERS DISABLED & VERIFIED ON {{ inventory_hostname }}
           ======================================================================
-          [Normal Users Found]: 
-          {{ normal_users_string | default('None found or error retrieving') }}
-
-          [Target Users Status]:
-          {% for status in target_user_report | default([]) %}
-            - {{ status }}
+          {% for res in status_results.results %}
+            - {{ res.stdout }}
           {% endfor %}
           ----------------------------------------------------------------------
       ignore_errors: true
