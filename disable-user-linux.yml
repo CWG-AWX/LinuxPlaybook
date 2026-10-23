@@ -1,24 +1,33 @@
 ---
 - name: Audit and Disable Target Users on Linux
-  hosts: all
-  gather_facts: true
+  hosts: linux
+  gather_facts: false
+  ignore_unreachable: true
   vars:
     target_users:
       - olanrenwaju
       - ferdinand
 
   tasks:
+    - name: Test connectivity to host
+      ansible.builtin.ping:
+      register: ping_result
+      ignore_unreachable: true
+
     - name: Gather normal users (UID >= 1000 and root)
+      when: ping_result is succeeded
       ansible.builtin.shell: |
         awk -F: '($3 >= 1000 && $3 < 65534) || $1 == "root" {print $1 ":" $3 ":" $7}' /etc/passwd
       register: linux_users_raw
       changed_when: false
 
     - name: Parse normal users list
+      when: ping_result is succeeded
       ansible.builtin.set_fact:
         normal_users: "{{ linux_users_raw.stdout_lines | map('regex_replace', '^(.*):(.*):(.*)$', '\\1 (UID: \\2, Shell: \\3)') | list }}"
 
     - name: Check and disable target users if present
+      when: ping_result is succeeded
       ansible.builtin.user:
         name: "{{ item }}"
         password_lock: true
@@ -28,6 +37,7 @@
       ignore_errors: true
 
     - name: Compile target users status report
+      when: ping_result is succeeded
       ansible.builtin.set_fact:
         target_user_report: >-
           {% set report = namespace(data=[]) %}
@@ -41,6 +51,7 @@
           {{ report.data }}
 
     - name: Display Linux User Audit and Action Report
+      when: ping_result is succeeded
       ansible.builtin.debug:
         msg: |
           ======================================================================
