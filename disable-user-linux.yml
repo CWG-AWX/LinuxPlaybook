@@ -1,5 +1,5 @@
 ---
-- name: Audit and Disable Target Users on Windows
+- name: Audit and Disable Target Users on Linux
   hosts: all
   gather_facts: false
   ignore_unreachable: true
@@ -9,44 +9,42 @@
       - ferdinand
 
   tasks:
-    - name: Test WinRM connectivity to host
-      ansible.windows.win_ping:
-      register: win_ping_result
+    - name: Test connectivity to host
+      ansible.builtin.ping:
+      register: ping_result
       ignore_unreachable: true
       ignore_errors: true
 
-    - name: Get all local user accounts
-      when: win_ping_result is succeeded
-      ansible.windows.win_shell: |
-        Get-LocalUser | Select-Object -ExpandProperty Name | ConvertTo-Json
-      register: win_users_raw
+    - name: Gather normal users (UID >= 1000 and root)
+      when: ping_result is succeeded
+      ansible.builtin.shell: |
+        awk -F: '($3 >= 1000 && $3 < 65534) || $1 == "root" {print $1}' /etc/passwd
+      register: linux_users_raw
       changed_when: false
       ignore_errors: true
 
-    - name: Parse local users list into comma-separated string
-      when: win_ping_result is succeeded and win_users_raw.stdout is defined
+    - name: Parse normal users list into comma-separated string
+      when: ping_result is succeeded and linux_users_raw.stdout_lines is defined
       ansible.builtin.set_fact:
-        normal_users_string: >-
-          {% set parsed = win_users_raw.stdout | from_json %}
-          {{ parsed if parsed is string else parsed | join(', ') }}
+        normal_users_string: "{{ linux_users_raw.stdout_lines | join(', ') }}"
       ignore_errors: true
 
     - name: Check and disable target users if present
-      when: win_ping_result is succeeded
-      ansible.windows.win_user:
+      when: ping_result is succeeded
+      ansible.builtin.user:
         name: "{{ item }}"
-        disabled: true
+        password_lock: true
         state: present
       loop: "{{ target_users }}"
-      register: win_user_disable_results
+      register: user_disable_results
       ignore_errors: true
 
-    - name: Compile Windows target users status report
-      when: ping_result is succeeded or win_ping_result is succeeded and win_user_disable_results.results is defined
+    - name: Compile target users status report
+      when: ping_result is succeeded and user_disable_results.results is defined
       ansible.builtin.set_fact:
         target_user_report: >-
           {% set report = namespace(data=[]) %}
-          {% for res in win_user_disable_results.results %}
+          {% for res in user_disable_results.results %}
             {% if res.failed is defined and res.failed %}
               {% set report.data = report.data + [res.item ~ ': Target user not found in list'] %}
             {% else %}
@@ -56,14 +54,14 @@
           {{ report.data }}
       ignore_errors: true
 
-    - name: Display Windows User Audit and Action Report
-      when: win_ping_result is succeeded
+    - name: Display Linux User Audit and Action Report
+      when: ping_result is succeeded
       ansible.builtin.debug:
         msg: |
           ======================================================================
-          WINDOWS USER AUDIT & DISABLE REPORT: {{ inventory_hostname }}
+          LINUX USER AUDIT & DISABLE REPORT: {{ inventory_hostname }}
           ======================================================================
-          [Local Users Found]: 
+          [Normal Users Found]: 
           {{ normal_users_string | default('None found or error retrieving') }}
 
           [Target Users Status]:
