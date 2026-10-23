@@ -5,7 +5,7 @@
   ignore_unreachable: true
   vars:
     target_users:
-      - olanrenwaju
+      - olanrewaju
       - ferdinand
 
   tasks:
