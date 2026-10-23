@@ -1,0 +1,58 @@
+---
+- name: Audit and Disable Target Users on Windows
+  hosts: windows
+  gather_facts: false
+  vars:
+    target_users:
+      - olanrenwaju
+      - ferdinand
+
+  tasks:
+    - name: Get all local user accounts
+      ansible.windows.win_shell: |
+        Get-LocalUser | Select-Object Name, Enabled | ConvertTo-Json
+      register: win_users_raw
+      changed_when: false
+
+    - name: Parse local users list
+      ansible.builtin.set_fact:
+        normal_users: "{{ (win_users_raw.stdout | from_json) | map(attribute='Name') | list }}"
+
+    - name: Check and disable target users if present
+      ansible.windows.win_user:
+        name: "{{ item }}"
+        disabled: true
+        state: present
+      loop: "{{ target_users }}"
+      register: win_user_disable_results
+      ignore_errors: true
+
+    - name: Compile Windows target users status report
+      ansible.builtin.set_fact:
+        target_user_report: >-
+          {% set report = namespace(data=[]) %}
+          {% for res in win_user_disable_results.results %}
+            {% if res.failed is defined and res.failed %}
+              {% set report.data = report.data + [res.item ~ ': Not found or could not be modified'] %}
+            {% else %}
+              {% set report.data = report.data + [res.item ~ ': Found and successfully disabled'] %}
+            {% endif %}
+          {% endfor %}
+          {{ report.data }}
+
+    - name: Display Windows User Audit and Action Report
+      ansible.builtin.debug:
+        msg: |
+          ======================================================================
+          WINDOWS USER AUDIT & DISABLE REPORT: {{ inventory_hostname }}
+          ======================================================================
+          [Local Users Found]:
+          {% for u in normal_users %}
+            - {{ u }}
+          {% endfor %}
+
+          [Target Users Status]:
+          {% for status in target_user_report %}
+            - {{ status }}
+          {% endfor %}
+          ----------------------------------------------------------------------
