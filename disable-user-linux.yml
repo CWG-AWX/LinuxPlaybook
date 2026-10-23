@@ -1,0 +1,58 @@
+---
+- name: Audit and Disable Target Users on Linux
+  hosts: all
+  gather_facts: true
+  vars:
+    target_users:
+      - olanrenwaju
+      - ferdinand
+
+  tasks:
+    - name: Gather normal users (UID >= 1000 and root)
+      ansible.builtin.shell: |
+        awk -F: '($3 >= 1000 && $3 < 65534) || $1 == "root" {print $1 ":" $3 ":" $7}' /etc/passwd
+      register: linux_users_raw
+      changed_when: false
+
+    - name: Parse normal users list
+      ansible.builtin.set_fact:
+        normal_users: "{{ linux_users_raw.stdout_lines | map('regex_replace', '^(.*):(.*):(.*)$', '\\1 (UID: \\2, Shell: \\3)') | list }}"
+
+    - name: Check and disable target users if present
+      ansible.builtin.user:
+        name: "{{ item }}"
+        password_lock: true
+        state: present
+      loop: "{{ target_users }}"
+      register: user_disable_results
+      ignore_errors: true
+
+    - name: Compile target users status report
+      ansible.builtin.set_fact:
+        target_user_report: >-
+          {% set report = namespace(data=[]) %}
+          {% for res in user_disable_results.results %}
+            {% if res.failed is defined and res.failed %}
+              {% set report.data = report.data + [res.item ~ ': Not found on host'] %}
+            {% else %}
+              {% set report.data = report.data + [res.item ~ ': Found and successfully disabled'] %}
+            {% endif %}
+          {% endfor %}
+          {{ report.data }}
+
+    - name: Display Linux User Audit and Action Report
+      ansible.builtin.debug:
+        msg: |
+          ======================================================================
+          LINUX USER AUDIT & DISABLE REPORT: {{ inventory_hostname }}
+          ======================================================================
+          [Normal Users Found]:
+          {% for u in normal_users %}
+            - {{ u }}
+          {% endfor %}
+
+          [Target Users Status]:
+          {% for status in target_user_report %}
+            - {{ status }}
+          {% endfor %}
+          ----------------------------------------------------------------------
