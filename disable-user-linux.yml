@@ -9,13 +9,16 @@
       - ferdinand
 
   tasks:
+
+    # ── Connectivity ───────────────────────────────────────────────────────────
     - name: Test connectivity to host
       ansible.builtin.ping:
       register: ping_result
       ignore_unreachable: true
       ignore_errors: true
 
-    - name: Gather normal users (UID >= 1000 and root)
+    # ── Gather all normal users (UID >= 1000) and root ─────────────────────────
+    - name: Gather normal users from /etc/passwd
       when: ping_result is succeeded
       ansible.builtin.shell: |
         awk -F: '($3 >= 1000 && $3 < 65534) || $1 == "root" {print $1}' /etc/passwd
@@ -23,50 +26,70 @@
       changed_when: false
       ignore_errors: true
 
-    - name: Parse normal users list into comma-separated string
-      when: ping_result is succeeded and linux_users_raw.stdout_lines is defined
-      ansible.builtin.set_fact:
-        normal_users_string: "{{ linux_users_raw.stdout_lines | join(', ') }}"
-      ignore_errors: true
-
-    - name: Check and disable target users if present
+    # ── Check which target users actually exist ────────────────────────────────
+    - name: Check if each target user exists
       when: ping_result is succeeded
-      ansible.builtin.user:
-        name: "{{ item }}"
-        password_lock: true
-        state: present
+      ansible.builtin.shell: |
+        id {{ item }} > /dev/null 2>&1 && echo "EXISTS" || echo "NOT_FOUND"
       loop: "{{ target_users }}"
-      register: user_disable_results
+      register: user_existence_checks
+      changed_when: false
       ignore_errors: true
 
-    - name: Compile target users status report
-      when: ping_result is succeeded and user_disable_results.results is defined
+    # ── Disable ONLY users that exist (no creation) ───────────────────────────
+    - name: Lock account for existing target users only
+      when:
+        - ping_result is succeeded
+        - item.stdout is defined
+        - item.stdout | trim == "EXISTS"
+      ansible.builtin.shell: |
+        usermod -L {{ item.item }}
+      loop: "{{ user_existence_checks.results | default([]) }}"
+      register: user_lock_results
+      ignore_errors: true
+
+    # ── Build the disabled-users list for reporting ────────────────────────────
+    - name: Build list of disabled users
+      when: ping_result is succeeded
       ansible.builtin.set_fact:
-        target_user_report: >-
-          {% set report = namespace(data=[]) %}
-          {% for res in user_disable_results.results %}
-            {% if res.failed is defined and res.failed %}
-              {% set report.data = report.data + [res.item ~ ': Target user not found in list'] %}
-            {% else %}
-              {% set report.data = report.data + [res.item ~ ': The user was disabled'] %}
-            {% endif %}
-          {% endfor %}
-          {{ report.data }}
+        disabled_users_list: >-
+          {{
+            user_existence_checks.results
+            | default([])
+            | selectattr('stdout', 'defined')
+            | selectattr('stdout', 'search', 'EXISTS')
+            | map(attribute='item')
+            | list
+          }}
       ignore_errors: true
 
-    - name: Display Linux User Audit and Action Report
+    # ── Final report ───────────────────────────────────────────────────────────
+    - name: Display Linux User Audit & Disable Report
       when: ping_result is succeeded
       ansible.builtin.debug:
         msg: |
           ======================================================================
           LINUX USER AUDIT & DISABLE REPORT: {{ inventory_hostname }}
           ======================================================================
-          [Normal Users Found]: 
-          {{ normal_users_string | default('None found or error retrieving') }}
 
-          [Target Users Status]:
-          {% for status in target_user_report | default([]) %}
-            - {{ status }}
+          [All Users Found on Server]:
+          {% if linux_users_raw.stdout_lines | default([]) | length > 0 %}
+          {% for user in linux_users_raw.stdout_lines %}
+            - {{ user }}{% if user in (disabled_users_list | default([])) %}  ← DISABLED{% endif %}
+
           {% endfor %}
+          {% else %}
+            None found or error retrieving users.
+          {% endif %}
+
+          [Target Users Disabled]:
+          {% if disabled_users_list | default([]) | length > 0 %}
+          {% for user in disabled_users_list %}
+            - {{ user }}: Account locked successfully
+          {% endfor %}
+          {% else %}
+            No target users were found or disabled on this host.
+          {% endif %}
+
           ----------------------------------------------------------------------
       ignore_errors: true
