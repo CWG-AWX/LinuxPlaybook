@@ -9,66 +9,101 @@
       - ferdinand
 
   tasks:
+
+    # ── Connectivity ───────────────────────────────────────────────────────────
     - name: Test WinRM connectivity to host
       ansible.windows.win_ping:
       register: win_ping_result
       ignore_unreachable: true
       ignore_errors: true
 
+    # ── Gather all local user accounts ────────────────────────────────────────
     - name: Get all local user accounts
       when: win_ping_result is succeeded
       ansible.windows.win_shell: |
-        Get-LocalUser | Select-Object -ExpandProperty Name | ConvertTo-Json
+        Get-LocalUser | Select-Object -ExpandProperty Name | ConvertTo-Json -Compress
       register: win_users_raw
       changed_when: false
       ignore_errors: true
 
-    - name: Parse local users list into comma-separated string
+    # ── Parse users into a clean list ─────────────────────────────────────────
+    - name: Parse local users into a list
       when: win_ping_result is succeeded and win_users_raw.stdout is defined
       ansible.builtin.set_fact:
-        normal_users_string: >-
-          {% set parsed = win_users_raw.stdout | from_json %}
-          {{ parsed if parsed is string else parsed | join(', ') }}
+        all_local_users: >-
+          {% set parsed = win_users_raw.stdout | trim | from_json %}
+          {{ [parsed] if parsed is string else parsed }}
       ignore_errors: true
 
-    - name: Check and disable target users if present
+    # ── Check which target users actually exist ────────────────────────────────
+    - name: Check if each target user exists
       when: win_ping_result is succeeded
-      ansible.windows.win_user:
-        name: "{{ item }}"
-        disabled: true
-        state: present
+      ansible.windows.win_shell: |
+        try {
+          $u = Get-LocalUser -Name "{{ item }}" -ErrorAction Stop
+          Write-Output "EXISTS"
+        } catch {
+          Write-Output "NOT_FOUND"
+        }
       loop: "{{ target_users }}"
+      register: win_user_existence_checks
+      changed_when: false
+      ignore_errors: true
+
+    # ── Disable ONLY users that exist (no creation) ───────────────────────────
+    - name: Disable existing target users only
+      when:
+        - win_ping_result is succeeded
+        - item.stdout is defined
+        - item.stdout | trim == "EXISTS"
+      ansible.windows.win_shell: |
+        Disable-LocalUser -Name "{{ item.item }}"
+      loop: "{{ win_user_existence_checks.results | default([]) }}"
       register: win_user_disable_results
       ignore_errors: true
 
-    - name: Compile Windows target users status report
-      when: ping_result is succeeded or win_ping_result is succeeded and win_user_disable_results.results is defined
+    # ── Build the disabled-users list for reporting ────────────────────────────
+    - name: Build list of disabled users
+      when: win_ping_result is succeeded
       ansible.builtin.set_fact:
-        target_user_report: >-
-          {% set report = namespace(data=[]) %}
-          {% for res in win_user_disable_results.results %}
-            {% if res.failed is defined and res.failed %}
-              {% set report.data = report.data + [res.item ~ ': Target user not found in list'] %}
-            {% else %}
-              {% set report.data = report.data + [res.item ~ ': The user was disabled'] %}
-            {% endif %}
-          {% endfor %}
-          {{ report.data }}
+        disabled_users_list: >-
+          {{
+            win_user_existence_checks.results
+            | default([])
+            | selectattr('stdout', 'defined')
+            | selectattr('stdout', 'search', 'EXISTS')
+            | map(attribute='item')
+            | list
+          }}
       ignore_errors: true
 
-    - name: Display Windows User Audit and Action Report
+    # ── Final report ───────────────────────────────────────────────────────────
+    - name: Display Windows User Audit & Disable Report
       when: win_ping_result is succeeded
       ansible.builtin.debug:
         msg: |
           ======================================================================
           WINDOWS USER AUDIT & DISABLE REPORT: {{ inventory_hostname }}
           ======================================================================
-          [Local Users Found]: 
-          {{ normal_users_string | default('None found or error retrieving') }}
 
-          [Target Users Status]:
-          {% for status in target_user_report | default([]) %}
-            - {{ status }}
+          [All Users Found on Server]:
+          {% if all_local_users | default([]) | length > 0 %}
+          {% for user in all_local_users %}
+            - {{ user }}{% if user in (disabled_users_list | default([])) %}  ← DISABLED{% endif %}
+
           {% endfor %}
+          {% else %}
+            None found or error retrieving users.
+          {% endif %}
+
+          [Target Users Disabled]:
+          {% if disabled_users_list | default([]) | length > 0 %}
+          {% for user in disabled_users_list %}
+            - {{ user }}: Account disabled successfully
+          {% endfor %}
+          {% else %}
+            No target users were found or disabled on this host.
+          {% endif %}
+
           ----------------------------------------------------------------------
       ignore_errors: true
