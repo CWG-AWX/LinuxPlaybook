@@ -8,35 +8,15 @@
 #   3. Reboot if required and wait until the host is back up
 #   4. Append result to CSV and email the report once at the end
 #
-# Expected variables (inventory / group_vars / vault):
-#   nutanix_host, nutanix_user, nutanix_pass, vault_smtp_password
+# Works with or without an AWX "Limit" (no dependency on localhost being in
+# the inventory limit).
+#
+# Supply these securely (AWX credential / extra vars / Ansible Vault):
+#   nutanix_user, nutanix_pass, vault_smtp_password
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# PLAY 1: Compute ONE timestamp for the whole run + create the CSV header
-# -----------------------------------------------------------------------------
-- name: Prepare run (timestamp and report header)
-  hosts: localhost
-  connection: local
-  gather_facts: false
-  become: false
-  tasks:
-    - name: Set run timestamp (evaluated once, shared by all plays)
-      ansible.builtin.set_fact:
-        run_stamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}"
-
-    - name: Set report file path
-      ansible.builtin.set_fact:
-        report_file: "/tmp/patch_audit_{{ run_stamp }}.csv"
-
-    - name: Build report header
-      ansible.builtin.copy:
-        dest: "{{ report_file }}"
-        content: "Hostname,IP,OS_Version,Clone_Name,Clone_Status,Patch_Status,Reboot_Required,Rebooted,Timestamp\n"
-        mode: "0644"
-
-# -----------------------------------------------------------------------------
-# PLAY 2: Clone every VM in Nutanix BEFORE touching it
+# PLAY 1: Run setup + clone every VM in Nutanix BEFORE touching it
 # -----------------------------------------------------------------------------
 - name: Clone VMs in Nutanix
   hosts: all
@@ -45,8 +25,10 @@
   vars:
     clone_poll_retries: 80      # 80 x 15s = 20 minutes max
     clone_poll_delay: 15
-    nutanix_host: "10.20.24.5" 
-    nutanix_user: "michael" 
+    nutanix_host: "10.20.24.5"
+    # Do NOT hardcode credentials here. Provide them via AWX credential,
+    # extra vars, or vault. Only uncomment for quick testing:
+    nutanix_user: "michael"
     nutanix_pass: "Oba@2024"
   module_defaults:
     ansible.builtin.uri:
@@ -56,11 +38,31 @@
       validate_certs: false
 
   tasks:
+    # --- Run-level setup (done once, shared with every host) ---
+    - name: Set run timestamp (once, shared with all hosts)
+      ansible.builtin.set_fact:
+        run_stamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}"
+      run_once: true
+
+    - name: Set report file path (once, shared with all hosts)
+      ansible.builtin.set_fact:
+        report_file: "/tmp/patch_audit_{{ run_stamp }}.csv"
+      run_once: true
+
+    - name: Build report header
+      ansible.builtin.copy:
+        dest: "{{ report_file }}"
+        content: "Hostname,IP,OS_Version,Clone_Name,Clone_Status,Patch_Status,Reboot_Required,Rebooted,Timestamp\n"
+        mode: "0644"
+      run_once: true
+      delegate_to: localhost
+
     - name: Define clone name (VM name + date of clone)
       ansible.builtin.set_fact:
-        clone_vm_name: "{{ inventory_hostname }}_clone_{{ hostvars['localhost'].run_stamp }}"
+        clone_vm_name: "{{ inventory_hostname }}_clone_{{ run_stamp }}"
         clone_status: "Pending"
 
+    # --- Clone ---
     - name: Clone VM and wait for completion
       block:
         - name: Retrieve VM from Nutanix
@@ -131,7 +133,7 @@
             msg: "Clone FAILED for {{ inventory_hostname }} - patching will be skipped. {{ ansible_failed_result.msg | default('') }}"
 
 # -----------------------------------------------------------------------------
-# PLAY 3: Patch, reboot if needed, record results
+# PLAY 2: Patch, reboot if needed, record results, send report
 # -----------------------------------------------------------------------------
 - name: Multi-OS Security Patching and Audit Reporting
   hosts: all
@@ -139,10 +141,14 @@
   ignore_unreachable: true
   gather_facts: true
   vars:
-    report_file: "{{ hostvars['localhost'].report_file }}"
     clone_ok: "{{ clone_status | default('Unknown') == 'Success' }}"
     reboot_timeout: 1200        # seconds to wait for host to come back
     post_reboot_delay: 30       # seconds to wait after reboot starts
+    smtp_server: "smtp.gmail.com"
+    smtp_port: 587
+    smtp_user: "ignioservices@gmail.com"
+    smtp_pass: "{{ vault_smtp_password }}"
+    email_recipient: "michael.obateru@cwg-plc.com, abdullateef.adekogbe@cwg-plc.com"
 
   tasks:
     - name: 1. Initialize variables
@@ -268,22 +274,7 @@
       throttle: 1
       ignore_errors: true
 
-# -----------------------------------------------------------------------------
-# PLAY 4: Send the report once, after every host has finished
-# -----------------------------------------------------------------------------
-- name: Send audit report
-  hosts: localhost
-  connection: local
-  gather_facts: false
-  become: false
-  vars:
-    report_file: "{{ hostvars['localhost'].report_file }}"
-    smtp_server: "smtp.gmail.com"
-    smtp_port: 587
-    smtp_user: "ignioservices@gmail.com"
-    smtp_pass: "{{ vault_smtp_password }}"
-    email_recipient: "michael.obateru@cwg-plc.com, abdullateef.adekogbe@cwg-plc.com"
-  tasks:
+    # --- SEND REPORT (once, after every host has written its row) ---
     - name: 6. Send Email
       community.general.mail:
         host: "{{ smtp_server }}"
@@ -295,3 +286,6 @@
         subject: "PROD AUDIT: OS Patching Report"
         body: "Patching cycle complete. Attached is the audit report including clone status, reboot status, and any unreachable hosts."
         attach: "{{ report_file }}"
+      run_once: true
+      delegate_to: localhost
+      become: false
