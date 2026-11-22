@@ -45,6 +45,9 @@
   vars:
     clone_poll_retries: 80      # 80 x 15s = 20 minutes max
     clone_poll_delay: 15
+    nutanix_host: "10.20.24.5" 
+    nutanix_user: "michael" 
+    nutanix_pass: "Oba@2024"
   module_defaults:
     ansible.builtin.uri:
       url_username: "{{ nutanix_user }}"
