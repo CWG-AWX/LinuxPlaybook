@@ -1,0 +1,37 @@
+---
+- name: Reboot Linux VMs and wait for them to come back online
+  hosts: all
+  become: yes
+  gather_facts: no
+  vars:
+    reboot_timeout: 1200      # max seconds to wait for the host to return
+    post_reboot_delay: 30     # seconds to wait after reboot starts before checking
+
+  tasks:
+    - name: Record uptime before reboot
+      ansible.builtin.command: uptime -s
+      register: boot_time_before
+      changed_when: false
+
+    - name: Reboot the VM and wait until it responds again
+      ansible.builtin.reboot:
+        msg: "Reboot initiated by Ansible"
+        reboot_timeout: "{{ reboot_timeout }}"
+        post_reboot_delay: "{{ post_reboot_delay }}"
+        test_command: uptime
+      register: reboot_result
+
+    - name: Confirm the host is reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Record uptime after reboot
+      ansible.builtin.command: uptime -s
+      register: boot_time_after
+      changed_when: false
+
+    - name: Verify the VM actually rebooted
+      ansible.builtin.assert:
+        that: boot_time_before.stdout != boot_time_after.stdout
+        fail_msg: "{{ inventory_hostname }} did not reboot (boot time unchanged)"
+        success_msg: "{{ inventory_hostname }} is back online. Last boot: {{ boot_time_after.stdout }} (took {{ reboot_result.elapsed }}s)"
