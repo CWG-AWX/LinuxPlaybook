@@ -1,0 +1,294 @@
+---
+# =============================================================================
+# Nutanix Clone -> Multi-OS Patching -> Conditional Reboot -> Audit Report
+#
+# Flow per VM:
+#   1. Clone the VM in Nutanix  (<vm_name>_clone_<YYYYMMDD_HHMM>)
+#   2. Patch the OS (RedHat / Debian families) - ONLY if the clone succeeded
+#   3. Reboot if required and wait until the host is back up
+#   4. Append result to CSV and email the report once at the end
+#
+# Expected variables (inventory / group_vars / vault):
+#   nutanix_host, nutanix_user, nutanix_pass, vault_smtp_password
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# PLAY 1: Compute ONE timestamp for the whole run + create the CSV header
+# -----------------------------------------------------------------------------
+- name: Prepare run (timestamp and report header)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Set run timestamp (evaluated once, shared by all plays)
+      ansible.builtin.set_fact:
+        run_stamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M') }}"
+
+    - name: Set report file path
+      ansible.builtin.set_fact:
+        report_file: "/tmp/patch_audit_{{ run_stamp }}.csv"
+
+    - name: Build report header
+      ansible.builtin.copy:
+        dest: "{{ report_file }}"
+        content: "Hostname,IP,OS_Version,Clone_Name,Clone_Status,Patch_Status,Reboot_Required,Rebooted,Timestamp\n"
+        mode: "0644"
+
+# -----------------------------------------------------------------------------
+# PLAY 2: Clone every VM in Nutanix BEFORE touching it
+# -----------------------------------------------------------------------------
+- name: Clone VMs in Nutanix
+  hosts: all
+  gather_facts: false
+  become: false
+  vars:
+    clone_poll_retries: 80      # 80 x 15s = 20 minutes max
+    clone_poll_delay: 15
+  module_defaults:
+    ansible.builtin.uri:
+      url_username: "{{ nutanix_user }}"
+      url_password: "{{ nutanix_pass }}"
+      force_basic_auth: true
+      validate_certs: false
+
+  tasks:
+    - name: Define clone name (VM name + date of clone)
+      ansible.builtin.set_fact:
+        clone_vm_name: "{{ inventory_hostname }}_clone_{{ hostvars['localhost'].run_stamp }}"
+        clone_status: "Pending"
+
+    - name: Clone VM and wait for completion
+      block:
+        - name: Retrieve VM from Nutanix
+          ansible.builtin.uri:
+            url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/?filter=vm_name%3D%3D{{ inventory_hostname | urlencode }}"
+            method: GET
+            headers:
+              Accept: "application/json"
+          delegate_to: localhost
+          register: vm_search
+
+        - name: Keep only exact name matches
+          ansible.builtin.set_fact:
+            vm_matches: "{{ vm_search.json.entities | default([]) | selectattr('vm_name', 'equalto', inventory_hostname) | list }}"
+
+        - name: Make sure exactly one VM matched
+          ansible.builtin.assert:
+            that: vm_matches | length == 1
+            fail_msg: "Expected exactly 1 Nutanix VM named {{ inventory_hostname }}, found {{ vm_matches | length }}"
+
+        - name: Set VM UUID fact
+          ansible.builtin.set_fact:
+            ntnx_uuid: "{{ vm_matches[0].uuid }}"
+
+        - name: "Clone VM (v2 API)"
+          ansible.builtin.uri:
+            url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/vms/{{ ntnx_uuid }}/clone"
+            method: POST
+            headers:
+              Accept: "application/json"
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              spec_list:
+                - name: "{{ clone_vm_name }}"
+            status_code: [200, 201, 202]
+          delegate_to: localhost
+          register: clone_resp
+
+        - name: "POLL: Wait for clone task"
+          ansible.builtin.uri:
+            url: "https://{{ nutanix_host }}:9440/api/nutanix/v2.0/tasks/{{ clone_resp.json.task_uuid }}"
+            method: GET
+            headers:
+              Accept: "application/json"
+          delegate_to: localhost
+          register: clone_task
+          until: clone_task.json.progress_status in ['Succeeded', 'Failed']
+          retries: "{{ clone_poll_retries }}"
+          delay: "{{ clone_poll_delay }}"
+          failed_when: clone_task.json.progress_status | default('') == 'Failed'
+
+        - name: Mark clone as successful
+          ansible.builtin.set_fact:
+            clone_status: "Success"
+
+        - name: Clone summary
+          ansible.builtin.debug:
+            msg: "Clone {{ clone_vm_name }} created for {{ inventory_hostname }}"
+
+      rescue:
+        - name: Mark clone as failed (host will NOT be patched)
+          ansible.builtin.set_fact:
+            clone_status: "Failed"
+
+        - name: Clone failure detail
+          ansible.builtin.debug:
+            msg: "Clone FAILED for {{ inventory_hostname }} - patching will be skipped. {{ ansible_failed_result.msg | default('') }}"
+
+# -----------------------------------------------------------------------------
+# PLAY 3: Patch, reboot if needed, record results
+# -----------------------------------------------------------------------------
+- name: Multi-OS Security Patching and Audit Reporting
+  hosts: all
+  become: true
+  ignore_unreachable: true
+  gather_facts: true
+  vars:
+    report_file: "{{ hostvars['localhost'].report_file }}"
+    clone_ok: "{{ clone_status | default('Unknown') == 'Success' }}"
+    reboot_timeout: 1200        # seconds to wait for host to come back
+    post_reboot_delay: 30       # seconds to wait after reboot starts
+
+  tasks:
+    - name: 1. Initialize variables
+      ansible.builtin.set_fact:
+        patch_status: "{{ 'No updates needed' if clone_ok | bool else 'SKIPPED - clone failed' }}"
+        reboot_required: "No"
+        rebooted: "No"
+        reporting_ip: "{{ ansible_default_ipv4.address | default(ansible_all_ipv4_addresses[0] | default(inventory_hostname)) }}"
+        full_os_name: "{{ ansible_distribution | default('Unknown') }} {{ ansible_distribution_version | default('OS') }}"
+        actual_hostname: "{{ ansible_hostname | default(inventory_hostname) }}"
+
+    # --- UNREACHABLE HANDLER ---
+    - name: Handle Unreachable Hosts
+      ansible.builtin.set_fact:
+        patch_status: "UNREACHABLE"
+        reboot_required: "N/A"
+        rebooted: "N/A"
+      when: ansible_os_family is undefined and clone_ok | bool
+
+    # --- RHEL / CENTOS SECTION ---
+    - name: 2. Patch RedHat Family
+      block:
+        - name: RHEL | Attempt to install reboot check tools
+          ansible.builtin.package:
+            name: yum-utils
+            state: present
+          ignore_errors: true
+
+        - name: RHEL | Upgrade Packages
+          ansible.builtin.package:
+            name: "*"
+            state: latest
+          register: rhel_out
+
+        - name: RHEL | Check if reboot is required
+          ansible.builtin.shell: |
+            if command -v needs-restarting >/dev/null 2>&1; then
+              needs-restarting -r
+            else
+              echo "tool-missing"
+            fi
+          register: rhel_reboot_check
+          failed_when: rhel_reboot_check.rc not in [0, 1]
+          changed_when: false
+
+        - name: RHEL | Record Status
+          ansible.builtin.set_fact:
+            patch_status: "{{ 'Success' if rhel_out.changed else 'No updates needed' }}"
+            reboot_required: >-
+              {% if rhel_reboot_check.rc == 1 %}Yes{% elif rhel_reboot_check.stdout == 'tool-missing' %}Unknown (Missing Tools){% else %}No{% endif %}
+      when:
+        - clone_ok | bool
+        - ansible_os_family is defined
+        - ansible_os_family == "RedHat"
+      rescue:
+        - ansible.builtin.set_fact:
+            patch_status: "Failed"
+
+    # --- DEBIAN / UBUNTU SECTION ---
+    - name: 3. Patch Debian Family
+      block:
+        - name: Debian | Upgrade
+          ansible.builtin.apt:
+            upgrade: dist
+            update_cache: true
+          register: deb_out
+
+        - name: Debian | Check Reboot
+          ansible.builtin.stat:
+            path: /var/run/reboot-required
+          register: reboot_file
+
+        - name: Debian | Record Status
+          ansible.builtin.set_fact:
+            patch_status: "{{ 'Success' if deb_out.changed else 'No updates needed' }}"
+            reboot_required: "{{ 'Yes' if reboot_file.stat.exists else 'No' }}"
+      when:
+        - clone_ok | bool
+        - ansible_os_family is defined
+        - ansible_os_family == "Debian"
+      rescue:
+        - ansible.builtin.set_fact:
+            patch_status: "Failed"
+
+    # --- REBOOT IF REQUIRED ---
+    - name: 4. Reboot if required and wait for host to come back
+      block:
+        - name: Reboot and wait until the host responds again
+          ansible.builtin.reboot:
+            msg: "Reboot initiated by patching playbook"
+            reboot_timeout: "{{ reboot_timeout }}"
+            post_reboot_delay: "{{ post_reboot_delay }}"
+            test_command: uptime
+
+        - name: Confirm host is up (refresh facts)
+          ansible.builtin.setup:
+            gather_subset: min
+
+        - name: Record successful reboot
+          ansible.builtin.set_fact:
+            rebooted: "Yes"
+
+        - name: Reboot confirmation
+          ansible.builtin.debug:
+            msg: "{{ inventory_hostname }} rebooted and is back online"
+      when:
+        - clone_ok | bool
+        - reboot_required == "Yes"
+        - patch_status != "Failed"
+      rescue:
+        - name: Record failed reboot
+          ansible.builtin.set_fact:
+            rebooted: "FAILED"
+            patch_status: "{{ patch_status }} - reboot FAILED / host not back online"
+
+    # --- REPORT GENERATION ---
+    - name: 5. Append host data to CSV
+      ansible.builtin.lineinfile:
+        path: "{{ report_file }}"
+        line: "{{ actual_hostname }},{{ reporting_ip }},{{ full_os_name }},{{ clone_vm_name | default('N/A') if clone_ok | bool else 'N/A' }},{{ clone_status | default('Unknown') }},{{ patch_status }},{{ reboot_required }},{{ rebooted }},{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+      delegate_to: localhost
+      become: false
+      throttle: 1
+      ignore_errors: true
+
+# -----------------------------------------------------------------------------
+# PLAY 4: Send the report once, after every host has finished
+# -----------------------------------------------------------------------------
+- name: Send audit report
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars:
+    report_file: "{{ hostvars['localhost'].report_file }}"
+    smtp_server: "smtp.gmail.com"
+    smtp_port: 587
+    smtp_user: "ignioservices@gmail.com"
+    smtp_pass: "{{ vault_smtp_password }}"
+    email_recipient: "michael.obateru@cwg-plc.com, abdullateef.adekogbe@cwg-plc.com"
+  tasks:
+    - name: 6. Send Email
+      community.general.mail:
+        host: "{{ smtp_server }}"
+        port: "{{ smtp_port }}"
+        username: "{{ smtp_user }}"
+        password: "{{ smtp_pass }}"
+        secure: starttls
+        to: "{{ email_recipient }}"
+        subject: "PROD AUDIT: OS Patching Report"
+        body: "Patching cycle complete. Attached is the audit report including clone status, reboot status, and any unreachable hosts."
+        attach: "{{ report_file }}"
